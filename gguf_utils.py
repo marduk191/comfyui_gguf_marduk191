@@ -316,8 +316,13 @@ class GGUFWriter:
             'quantization_type': quantization_type,
         })
 
-    def save(self):
-        """Write GGUF file to disk with memory-efficient streaming"""
+    def save(self, use_gpu=False, gc_interval=10):
+        """Write GGUF file to disk with memory-efficient streaming
+
+        Args:
+            use_gpu: If True, perform quantization on GPU for faster processing (recommended for RTX 4090/5090)
+            gc_interval: How often to run garbage collection (lower = more memory efficient, higher = faster)
+        """
         import gc
 
         with open(self.filepath, 'wb') as f:
@@ -400,14 +405,28 @@ class GGUFWriter:
                 tensor = self.tensors[tensor_idx]['tensor']
                 quant_type = info['dtype']
 
-                # Move tensor to CPU if on GPU to save VRAM
-                if tensor.is_cuda:
-                    tensor = tensor.cpu()
+                # GPU acceleration: keep tensor on GPU during quantization for speed
+                # Only move to CPU when writing to disk
+                if use_gpu and tensor.is_cuda:
+                    # Quantize on GPU (much faster on RTX 4090/5090)
+                    with torch.no_grad():
+                        quantized_data = self._quantize_tensor(tensor, quant_type)
+                    # Move result to CPU for disk write
+                    if isinstance(quantized_data, bytes):
+                        pass  # Already in CPU memory as bytes
+                    else:
+                        # This shouldn't happen, but handle it
+                        quantized_data = quantized_data.cpu() if hasattr(quantized_data, 'cpu') else quantized_data
+                else:
+                    # Memory-efficient mode: move to CPU before quantization to save VRAM
+                    if tensor.is_cuda:
+                        tensor = tensor.cpu()
 
-                # Quantize and write tensor
-                with torch.no_grad():  # Disable gradient tracking to save memory
-                    quantized_data = self._quantize_tensor(tensor, quant_type)
-                    f.write(quantized_data)
+                    # Quantize and write tensor
+                    with torch.no_grad():  # Disable gradient tracking to save memory
+                        quantized_data = self._quantize_tensor(tensor, quant_type)
+
+                f.write(quantized_data)
 
                 # Force cleanup of quantized data
                 del quantized_data
@@ -421,7 +440,7 @@ class GGUFWriter:
 
                 # Clear tensor from memory if possible (don't modify original)
                 # Periodic garbage collection
-                if tensor_idx % 10 == 0:
+                if tensor_idx % gc_interval == 0:
                     gc.collect()
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()

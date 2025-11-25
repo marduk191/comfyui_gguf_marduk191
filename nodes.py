@@ -460,6 +460,7 @@ class GGUFModelSaver:
                 "custom_path": ("STRING", {"default": "", "multiline": False}),
                 "metadata": ("DICT",),
                 "apply_quantize_patch": ("BOOLEAN", {"default": True}),
+                "gpu_accelerated": ("BOOLEAN", {"default": False}),
             }
         }
 
@@ -470,7 +471,7 @@ class GGUFModelSaver:
     OUTPUT_NODE = True
 
     def save_model(self, model, filename, quantization, save_path, custom_path="",
-                   metadata=None, apply_quantize_patch=True):
+                   metadata=None, apply_quantize_patch=True, gpu_accelerated=False):
 
         # Determine save path
         if save_path == "custom" and custom_path:
@@ -522,10 +523,11 @@ class GGUFModelSaver:
             # Add tensor (supports 1D-5D, with 1D forced to F16)
             writer.add_tensor(name, tensor, quant_type)
 
-        # Save to file
-        writer.save()
+        # Save to file (with GPU acceleration if enabled)
+        writer.save(use_gpu=gpu_accelerated)
 
-        print(f"Saved GGUF model to {filepath} with {quantization} quantization")
+        accel_msg = " (GPU accelerated)" if gpu_accelerated else ""
+        print(f"Saved GGUF model to {filepath} with {quantization} quantization{accel_msg}")
         return (filepath,)
 
 
@@ -556,6 +558,7 @@ class GGUFCheckpointSaver:
                 "vae": ("VAE",),
                 "save_path": ("STRING", {"default": "models/gguf/checkpoints", "multiline": False}),
                 "metadata": ("DICT",),
+                "gpu_accelerated": ("BOOLEAN", {"default": False}),
             }
         }
 
@@ -567,7 +570,7 @@ class GGUFCheckpointSaver:
 
     def save_checkpoint(self, filename, quantization_unet, quantization_clip, quantization_vae,
                         model=None, clip=None, vae=None, save_path="models/gguf/checkpoints",
-                        metadata=None):
+                        metadata=None, gpu_accelerated=False):
 
         filepath = os.path.join(save_path, filename)
         os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else ".", exist_ok=True)
@@ -622,10 +625,11 @@ class GGUFCheckpointSaver:
             except Exception as e:
                 print(f"Warning: Could not extract VAE state dict: {e}")
 
-        # Save to file
-        writer.save()
+        # Save to file (with GPU acceleration if enabled)
+        writer.save(use_gpu=gpu_accelerated)
 
-        print(f"Saved GGUF checkpoint to {filepath}")
+        accel_msg = " (GPU accelerated)" if gpu_accelerated else ""
+        print(f"Saved GGUF checkpoint to {filepath}{accel_msg}")
         return (filepath,)
 
 
@@ -845,6 +849,7 @@ class GGUFTensorQuantizer:
             },
             "optional": {
                 "tensor_name": ("STRING", {"default": "tensor", "multiline": False}),
+                "gpu_accelerated": ("BOOLEAN", {"default": False}),
             }
         }
 
@@ -854,7 +859,7 @@ class GGUFTensorQuantizer:
     CATEGORY = "utils/gguf"
 
     def quantize_tensor(self, tensor, quantization, apply_pre_quantization_patch=True,
-                       tensor_name="tensor"):
+                       tensor_name="tensor", gpu_accelerated=False):
 
         # Map quantization string to type
         quant_map = {
@@ -883,7 +888,7 @@ class GGUFTensorQuantizer:
         with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as tmp:
             writer = GGUFWriter(tmp.name)
             writer.add_tensor(tensor_name, tensor, quant_type)
-            writer.save()
+            writer.save(use_gpu=gpu_accelerated)
 
             # Load back to get quantized version
             loader = GGUFLoader(tmp.name)
