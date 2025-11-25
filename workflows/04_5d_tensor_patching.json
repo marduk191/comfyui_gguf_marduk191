@@ -1,0 +1,111 @@
+{
+  "last_node_id": 7,
+  "last_link_id": 5,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "CheckpointLoaderSimple",
+      "pos": [50, 50],
+      "size": {"0": 350, "1": 100},
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "outputs": [
+        {"name": "MODEL", "type": "MODEL", "links": [1]},
+        {"name": "CLIP", "type": "CLIP", "links": []},
+        {"name": "VAE", "type": "VAE", "links": []}
+      ],
+      "properties": {},
+      "widgets_values": [
+        "flux_dev.safetensors"
+      ],
+      "title": "Load Model with 5D Tensors"
+    },
+    {
+      "id": 2,
+      "type": "GGUF5DTensorPatcher",
+      "pos": [450, 50],
+      "size": {"0": 350, "1": 220},
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {"name": "model", "type": "MODEL", "link": 1}
+      ],
+      "outputs": [
+        {"name": "MODEL", "type": "MODEL", "links": [2]}
+      ],
+      "properties": {},
+      "widgets_values": [
+        "quantize_aware",
+        "Q4_K",
+        1.0,
+        -10.0,
+        10.0
+      ],
+      "title": "Patch 5D Tensors (Quantization-Aware)"
+    },
+    {
+      "id": 3,
+      "type": "GGUFModelSaver",
+      "pos": [850, 50],
+      "size": {"0": 350, "1": 200},
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {"name": "model", "type": "MODEL", "link": 2}
+      ],
+      "outputs": [
+        {"name": "filepath", "type": "STRING", "links": [3]}
+      ],
+      "properties": {},
+      "widgets_values": [
+        "flux_dev_q4k_patched.gguf",
+        "Q4_K",
+        "models/gguf",
+        "",
+        null,
+        true
+      ],
+      "title": "Save Optimized GGUF"
+    },
+    {
+      "id": 4,
+      "type": "ShowText",
+      "pos": [1250, 50],
+      "size": {"0": 300, "1": 100},
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {"name": "text", "type": "STRING", "link": 3}
+      ],
+      "properties": {},
+      "title": "Output Path"
+    },
+    {
+      "id": 5,
+      "type": "Note",
+      "pos": [50, 320],
+      "size": {"0": 750, "1": 300},
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "properties": {},
+      "widgets_values": [
+        "5D Tensor Patching Workflow\n\nThis workflow demonstrates advanced tensor patching before quantization:\n\n🔧 GGUF 5D Tensor Patcher Operations:\n\n1. quantize_aware (Recommended): Optimizes tensors for target quantization\n   - Adjusts dynamic range based on quantization type\n   - Reduces artifacts in low-bit quantization (Q2_K, Q3_K, Q4_K)\n\n2. normalize: Zero-mean, unit-variance normalization\n   - Useful for models with unnormalized weights\n\n3. scale: Multiply all values by scale_factor\n   - Fine-tune weight magnitudes\n\n4. clip_range: Clamp values to [clip_min, clip_max]\n   - Remove outliers that hurt quantization\n\n5. reduce_dynamic_range: Reduce range by 50%\n   - Aggressive optimization for very low-bit quantization\n\n6. adaptive_scale: Scale based on tensor statistics\n   - Automatic normalization\n\n💡 Best Practice: Use 'quantize_aware' before saving to GGUF format!\nThis preserves quality while maximizing compression."
+      ],
+      "title": "Info: 5D Tensor Patching"
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "MODEL"],
+    [2, 2, 0, 3, 0, "MODEL"],
+    [3, 3, 0, 4, 0, "STRING"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}
