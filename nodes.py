@@ -6,7 +6,10 @@ Comprehensive nodes for loading and working with GGUF quantized models
 import os
 import folder_paths
 import torch
-from .gguf_utils import GGUFLoader, get_gguf_models, load_gguf_state_dict
+from .gguf_utils import (
+    GGUFLoader, GGUFWriter, get_gguf_models, load_gguf_state_dict,
+    GGMLType, patch_5d_tensor, quantize_aware_patch
+)
 
 
 class GGUFModelLoader:
@@ -403,3 +406,407 @@ class GGUFModelPatcher:
                 pass
 
         return (patched_model,)
+
+
+class GGUFModelSaver:
+    """Save models to GGUF format with quantization and 5D tensor support"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "filename": ("STRING", {"default": "model.gguf", "multiline": False}),
+                "quantization": ([
+                    "F32", "F16",
+                    "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1",
+                    "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_K"
+                ], {"default": "Q4_K"}),
+                "save_path": (["models/gguf", "models/gguf/unet", "custom"], {"default": "models/gguf"}),
+            },
+            "optional": {
+                "custom_path": ("STRING", {"default": "", "multiline": False}),
+                "metadata": ("DICT",),
+                "apply_quantize_patch": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("filepath",)
+    FUNCTION = "save_model"
+    CATEGORY = "savers/gguf"
+    OUTPUT_NODE = True
+
+    def save_model(self, model, filename, quantization, save_path, custom_path="",
+                   metadata=None, apply_quantize_patch=True):
+
+        # Determine save path
+        if save_path == "custom" and custom_path:
+            filepath = os.path.join(custom_path, filename)
+        else:
+            filepath = os.path.join(save_path, filename)
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else ".", exist_ok=True)
+
+        # Map quantization string to type
+        quant_map = {
+            "F32": GGMLType.F32,
+            "F16": GGMLType.F16,
+            "Q4_0": GGMLType.Q4_0,
+            "Q4_1": GGMLType.Q4_1,
+            "Q5_0": GGMLType.Q5_0,
+            "Q5_1": GGMLType.Q5_1,
+            "Q8_0": GGMLType.Q8_0,
+            "Q8_1": GGMLType.Q8_1,
+            "Q2_K": GGMLType.Q2_K,
+            "Q3_K": GGMLType.Q3_K,
+            "Q4_K": GGMLType.Q4_K,
+            "Q5_K": GGMLType.Q5_K,
+            "Q6_K": GGMLType.Q6_K,
+            "Q8_K": GGMLType.Q8_K,
+        }
+        quant_type = quant_map[quantization]
+
+        # Create GGUF writer
+        writer = GGUFWriter(filepath, metadata=metadata)
+
+        # Add default metadata
+        writer.add_metadata("quantization_version", 2)
+        writer.add_metadata("file_type", quantization)
+
+        # Extract tensors from model
+        if isinstance(model, dict):
+            state_dict = model
+        elif hasattr(model, 'state_dict'):
+            state_dict = model.state_dict()
+        elif hasattr(model, 'model') and hasattr(model.model, 'state_dict'):
+            state_dict = model.model.state_dict()
+        else:
+            # Assume it's already a state dict
+            state_dict = model
+
+        # Add tensors with quantization
+        for name, tensor in state_dict.items():
+            if not isinstance(tensor, torch.Tensor):
+                continue
+
+            # Apply quantization-aware patching if enabled
+            if apply_quantize_patch and tensor.dim() >= 2:
+                tensor = quantize_aware_patch(tensor, quant_type)
+
+            # Add tensor (supports 2D-5D)
+            writer.add_tensor(name, tensor, quant_type)
+
+        # Save to file
+        writer.save()
+
+        print(f"Saved GGUF model to {filepath} with {quantization} quantization")
+        return (filepath,)
+
+
+class GGUFCheckpointSaver:
+    """Save complete checkpoints (UNet + CLIP + VAE) to GGUF format"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "filename": ("STRING", {"default": "checkpoint.gguf", "multiline": False}),
+                "quantization_unet": ([
+                    "F32", "F16", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1",
+                    "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_K"
+                ], {"default": "Q4_K"}),
+                "quantization_clip": ([
+                    "F32", "F16", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1",
+                    "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_K"
+                ], {"default": "Q8_0"}),
+                "quantization_vae": ([
+                    "F32", "F16", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1",
+                    "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_K"
+                ], {"default": "F16"}),
+            },
+            "optional": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+                "vae": ("VAE",),
+                "save_path": ("STRING", {"default": "models/gguf/checkpoints", "multiline": False}),
+                "metadata": ("DICT",),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("filepath",)
+    FUNCTION = "save_checkpoint"
+    CATEGORY = "savers/gguf"
+    OUTPUT_NODE = True
+
+    def save_checkpoint(self, filename, quantization_unet, quantization_clip, quantization_vae,
+                        model=None, clip=None, vae=None, save_path="models/gguf/checkpoints",
+                        metadata=None):
+
+        filepath = os.path.join(save_path, filename)
+        os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else ".", exist_ok=True)
+
+        # Map quantization strings to types
+        quant_map = {
+            "F32": GGMLType.F32, "F16": GGMLType.F16,
+            "Q4_0": GGMLType.Q4_0, "Q4_1": GGMLType.Q4_1,
+            "Q5_0": GGMLType.Q5_0, "Q5_1": GGMLType.Q5_1,
+            "Q8_0": GGMLType.Q8_0, "Q8_1": GGMLType.Q8_1,
+            "Q2_K": GGMLType.Q2_K, "Q3_K": GGMLType.Q3_K,
+            "Q4_K": GGMLType.Q4_K, "Q5_K": GGMLType.Q5_K,
+            "Q6_K": GGMLType.Q6_K, "Q8_K": GGMLType.Q8_K,
+        }
+
+        # Create GGUF writer
+        writer = GGUFWriter(filepath, metadata=metadata)
+
+        # Add metadata
+        writer.add_metadata("file_type", "checkpoint")
+        writer.add_metadata("quantization_unet", quantization_unet)
+        writer.add_metadata("quantization_clip", quantization_clip)
+        writer.add_metadata("quantization_vae", quantization_vae)
+
+        # Add model tensors
+        if model is not None:
+            state_dict = model if isinstance(model, dict) else (
+                model.state_dict() if hasattr(model, 'state_dict') else model
+            )
+            for name, tensor in state_dict.items():
+                if isinstance(tensor, torch.Tensor):
+                    writer.add_tensor(f"model.{name}", tensor, quant_map[quantization_unet])
+
+        # Add CLIP tensors
+        if clip is not None:
+            state_dict = clip if isinstance(clip, dict) else (
+                clip.state_dict() if hasattr(clip, 'state_dict') else clip
+            )
+            for name, tensor in state_dict.items():
+                if isinstance(tensor, torch.Tensor):
+                    writer.add_tensor(f"clip.{name}", tensor, quant_map[quantization_clip])
+
+        # Add VAE tensors
+        if vae is not None:
+            state_dict = vae if isinstance(vae, dict) else (
+                vae.state_dict() if hasattr(vae, 'state_dict') else vae
+            )
+            for name, tensor in state_dict.items():
+                if isinstance(tensor, torch.Tensor):
+                    writer.add_tensor(f"vae.{name}", tensor, quant_map[quantization_vae])
+
+        # Save to file
+        writer.save()
+
+        print(f"Saved GGUF checkpoint to {filepath}")
+        return (filepath,)
+
+
+class GGUF5DTensorPatcher:
+    """Patch 5D tensors during GGUF creation with various operations"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "patch_operation": ([
+                    "normalize", "scale", "clip_range", "quantize_aware",
+                    "reduce_dynamic_range", "adaptive_scale"
+                ], {"default": "quantize_aware"}),
+                "target_quantization": ([
+                    "Q4_0", "Q4_1", "Q4_K", "Q5_0", "Q5_1", "Q5_K",
+                    "Q8_0", "Q8_1", "Q8_K", "Q2_K", "Q3_K", "Q6_K"
+                ], {"default": "Q4_K"}),
+            },
+            "optional": {
+                "scale_factor": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 10.0, "step": 0.1}),
+                "clip_min": ("FLOAT", {"default": -10.0, "min": -100.0, "max": 0.0, "step": 0.1}),
+                "clip_max": ("FLOAT", {"default": 10.0, "min": 0.0, "max": 100.0, "step": 0.1}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "patch_tensors"
+    CATEGORY = "model_patches/gguf"
+
+    def patch_tensors(self, model, patch_operation, target_quantization,
+                     scale_factor=1.0, clip_min=-10.0, clip_max=10.0):
+
+        # Map quantization string to type
+        quant_map = {
+            "Q4_0": GGMLType.Q4_0, "Q4_1": GGMLType.Q4_1, "Q4_K": GGMLType.Q4_K,
+            "Q5_0": GGMLType.Q5_0, "Q5_1": GGMLType.Q5_1, "Q5_K": GGMLType.Q5_K,
+            "Q8_0": GGMLType.Q8_0, "Q8_1": GGMLType.Q8_1, "Q8_K": GGMLType.Q8_K,
+            "Q2_K": GGMLType.Q2_K, "Q3_K": GGMLType.Q3_K, "Q6_K": GGMLType.Q6_K,
+        }
+        quant_type = quant_map[target_quantization]
+
+        # Extract state dict
+        if isinstance(model, dict):
+            state_dict = model
+        elif hasattr(model, 'state_dict'):
+            state_dict = model.state_dict()
+        else:
+            state_dict = model
+
+        patched_state_dict = {}
+
+        # Apply patching to each tensor
+        for name, tensor in state_dict.items():
+            if not isinstance(tensor, torch.Tensor):
+                patched_state_dict[name] = tensor
+                continue
+
+            # Only patch 2D-5D tensors
+            if tensor.dim() < 2 or tensor.dim() > 5:
+                patched_state_dict[name] = tensor
+                continue
+
+            # Apply patch operation
+            if patch_operation == "normalize":
+                def normalize_fn(t):
+                    mean = t.mean()
+                    std = t.std()
+                    return (t - mean) / (std + 1e-8) if std > 0 else t
+                patched_tensor = patch_5d_tensor(tensor, normalize_fn)
+
+            elif patch_operation == "scale":
+                def scale_fn(t):
+                    return t * scale_factor
+                patched_tensor = patch_5d_tensor(tensor, scale_fn)
+
+            elif patch_operation == "clip_range":
+                def clip_fn(t):
+                    return torch.clamp(t, clip_min, clip_max)
+                patched_tensor = patch_5d_tensor(tensor, clip_fn)
+
+            elif patch_operation == "quantize_aware":
+                def quant_aware_fn(t):
+                    return quantize_aware_patch(t, quant_type)
+                patched_tensor = patch_5d_tensor(tensor, quant_aware_fn)
+
+            elif patch_operation == "reduce_dynamic_range":
+                def reduce_range_fn(t):
+                    # Reduce dynamic range while preserving sign
+                    abs_max = t.abs().max()
+                    if abs_max > 0:
+                        target_max = abs_max * 0.5
+                        return t * (target_max / abs_max)
+                    return t
+                patched_tensor = patch_5d_tensor(tensor, reduce_range_fn)
+
+            elif patch_operation == "adaptive_scale":
+                def adaptive_fn(t):
+                    # Scale based on tensor statistics
+                    std = t.std()
+                    if std > 1.0:
+                        return t / std
+                    return t
+                patched_tensor = patch_5d_tensor(tensor, adaptive_fn)
+
+            else:
+                patched_tensor = tensor
+
+            patched_state_dict[name] = patched_tensor
+
+        print(f"Patched {len(patched_state_dict)} tensors with {patch_operation} operation")
+        return (patched_state_dict,)
+
+
+class GGUFTensorQuantizer:
+    """Quantize individual tensors with preview and quality control"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "tensor": ("TENSOR",),
+                "quantization": ([
+                    "F32", "F16",
+                    "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1",
+                    "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_K"
+                ], {"default": "Q4_K"}),
+                "apply_pre_quantization_patch": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "tensor_name": ("STRING", {"default": "tensor", "multiline": False}),
+            }
+        }
+
+    RETURN_TYPES = ("TENSOR", "STRING")
+    RETURN_NAMES = ("quantized_tensor", "statistics")
+    FUNCTION = "quantize_tensor"
+    CATEGORY = "utils/gguf"
+
+    def quantize_tensor(self, tensor, quantization, apply_pre_quantization_patch=True,
+                       tensor_name="tensor"):
+
+        # Map quantization string to type
+        quant_map = {
+            "F32": GGMLType.F32, "F16": GGMLType.F16,
+            "Q4_0": GGMLType.Q4_0, "Q4_1": GGMLType.Q4_1,
+            "Q5_0": GGMLType.Q5_0, "Q5_1": GGMLType.Q5_1,
+            "Q8_0": GGMLType.Q8_0, "Q8_1": GGMLType.Q8_1,
+            "Q2_K": GGMLType.Q2_K, "Q3_K": GGMLType.Q3_K,
+            "Q4_K": GGMLType.Q4_K, "Q5_K": GGMLType.Q5_K,
+            "Q6_K": GGMLType.Q6_K, "Q8_K": GGMLType.Q8_K,
+        }
+        quant_type = quant_map[quantization]
+
+        # Calculate original statistics
+        orig_mean = tensor.mean().item()
+        orig_std = tensor.std().item()
+        orig_min = tensor.min().item()
+        orig_max = tensor.max().item()
+
+        # Apply pre-quantization patch if enabled
+        if apply_pre_quantization_patch:
+            tensor = quantize_aware_patch(tensor, quant_type)
+
+        # Create temporary writer to quantize
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".gguf", delete=False) as tmp:
+            writer = GGUFWriter(tmp.name)
+            writer.add_tensor(tensor_name, tensor, quant_type)
+            writer.save()
+
+            # Load back to get quantized version
+            loader = GGUFLoader(tmp.name)
+            data = loader.load()
+            quantized_tensor = data['tensors'][tensor_name]
+
+        # Clean up temp file
+        os.unlink(tmp.name)
+
+        # Calculate quantized statistics
+        quant_mean = quantized_tensor.mean().item()
+        quant_std = quantized_tensor.std().item()
+        quant_min = quantized_tensor.min().item()
+        quant_max = quantized_tensor.max().item()
+
+        # Calculate error metrics
+        mse = ((tensor - quantized_tensor) ** 2).mean().item()
+        mae = (tensor - quantized_tensor).abs().mean().item()
+
+        # Format statistics
+        stats = f"""Quantization Statistics for {tensor_name}:
+Quantization: {quantization}
+Tensor Shape: {list(tensor.shape)}
+
+Original:
+  Mean: {orig_mean:.6f}, Std: {orig_std:.6f}
+  Min: {orig_min:.6f}, Max: {orig_max:.6f}
+
+Quantized:
+  Mean: {quant_mean:.6f}, Std: {quant_std:.6f}
+  Min: {quant_min:.6f}, Max: {quant_max:.6f}
+
+Error Metrics:
+  MSE: {mse:.6f}
+  MAE: {mae:.6f}
+  Relative Error: {(mae / (abs(orig_mean) + 1e-8) * 100):.2f}%
+"""
+
+        print(stats)
+        return (quantized_tensor, stats)

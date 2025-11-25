@@ -12,6 +12,10 @@ from .nodes import (
     GGUFCheckpointLoader,
     GGUFModelSampler,
     GGUFModelPatcher,
+    GGUFModelSaver,
+    GGUFCheckpointSaver,
+    GGUF5DTensorPatcher,
+    GGUFTensorQuantizer,
 )
 
 NODE_CLASS_MAPPINGS = {
@@ -23,6 +27,10 @@ NODE_CLASS_MAPPINGS = {
     "GGUFCheckpointLoader": GGUFCheckpointLoader,
     "GGUFModelSampler": GGUFModelSampler,
     "GGUFModelPatcher": GGUFModelPatcher,
+    "GGUFModelSaver": GGUFModelSaver,
+    "GGUFCheckpointSaver": GGUFCheckpointSaver,
+    "GGUF5DTensorPatcher": GGUF5DTensorPatcher,
+    "GGUFTensorQuantizer": GGUFTensorQuantizer,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -34,6 +42,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GGUFCheckpointLoader": "GGUF Checkpoint Loader",
     "GGUFModelSampler": "GGUF Model Sampler",
     "GGUFModelPatcher": "GGUF Model Patcher",
+    "GGUFModelSaver": "GGUF Model Saver",
+    "GGUFCheckpointSaver": "GGUF Checkpoint Saver",
+    "GGUF5DTensorPatcher": "GGUF 5D Tensor Patcher",
+    "GGUFTensorQuantizer": "GGUF Tensor Quantizer",
 }
 
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']

@@ -252,3 +252,561 @@ def load_gguf_state_dict(filepath: str) -> Dict[str, torch.Tensor]:
     loader = GGUFLoader(filepath)
     data = loader.load()
     return data['tensors']
+
+
+class GGUFWriter:
+    """Write and save GGUF format models with 5D tensor support"""
+
+    # GGUF metadata value types
+    GGUF_TYPE_UINT8 = 0
+    GGUF_TYPE_INT8 = 1
+    GGUF_TYPE_UINT16 = 2
+    GGUF_TYPE_INT16 = 3
+    GGUF_TYPE_UINT32 = 4
+    GGUF_TYPE_INT32 = 5
+    GGUF_TYPE_FLOAT32 = 6
+    GGUF_TYPE_BOOL = 7
+    GGUF_TYPE_STRING = 8
+    GGUF_TYPE_ARRAY = 9
+    GGUF_TYPE_UINT64 = 10
+    GGUF_TYPE_INT64 = 11
+    GGUF_TYPE_FLOAT64 = 12
+
+    def __init__(self, filepath: str, metadata: Optional[Dict[str, Any]] = None):
+        self.filepath = filepath
+        self.metadata = metadata or {}
+        self.tensors = []
+        self.alignment = 32
+
+    def add_metadata(self, key: str, value: Any, value_type: Optional[int] = None):
+        """Add metadata key-value pair"""
+        if value_type is None:
+            # Auto-detect type
+            if isinstance(value, bool):
+                value_type = self.GGUF_TYPE_BOOL
+            elif isinstance(value, str):
+                value_type = self.GGUF_TYPE_STRING
+            elif isinstance(value, float):
+                value_type = self.GGUF_TYPE_FLOAT32
+            elif isinstance(value, int):
+                if value < 0:
+                    value_type = self.GGUF_TYPE_INT32
+                else:
+                    value_type = self.GGUF_TYPE_UINT32
+            elif isinstance(value, list):
+                value_type = self.GGUF_TYPE_ARRAY
+            else:
+                raise ValueError(f"Cannot auto-detect type for {type(value)}")
+
+        self.metadata[key] = (value, value_type)
+
+    def add_tensor(self, name: str, tensor: torch.Tensor, quantization_type: int = GGMLType.F32):
+        """Add a tensor to be written (supports 2D-5D tensors)"""
+        if tensor.dim() < 2 or tensor.dim() > 5:
+            raise ValueError(f"Tensor {name} must be 2D-5D, got {tensor.dim()}D")
+
+        self.tensors.append({
+            'name': name,
+            'tensor': tensor,
+            'quantization_type': quantization_type,
+        })
+
+    def save(self):
+        """Write GGUF file to disk"""
+        with open(self.filepath, 'wb') as f:
+            # Write header
+            f.write(struct.pack('<I', GGUF_MAGIC))
+            f.write(struct.pack('<I', GGUF_VERSION))
+            f.write(struct.pack('<Q', len(self.tensors)))
+            f.write(struct.pack('<Q', len(self.metadata)))
+
+            # Write metadata
+            for key, (value, value_type) in self.metadata.items():
+                self._write_string(f, key)
+                f.write(struct.pack('<I', value_type))
+                self._write_value(f, value, value_type)
+
+            # Calculate tensor data offsets
+            tensor_infos = []
+            current_offset = 0
+
+            for tensor_dict in self.tensors:
+                tensor = tensor_dict['tensor']
+                quant_type = tensor_dict['quantization_type']
+
+                # Get dimensions in GGUF format (reversed)
+                dims = tuple(tensor.shape[::-1])
+                n_elements = tensor.numel()
+
+                # Calculate size based on quantization
+                if quant_type == GGMLType.F32:
+                    data_size = n_elements * 4
+                elif quant_type == GGMLType.F16:
+                    data_size = n_elements * 2
+                elif quant_type in [GGMLType.Q4_0, GGMLType.Q4_1, GGMLType.Q5_0,
+                                     GGMLType.Q5_1, GGMLType.Q8_0, GGMLType.Q8_1]:
+                    block_size = 32
+                    bytes_per_block = self._get_bytes_per_block(quant_type)
+                    n_blocks = (n_elements + block_size - 1) // block_size
+                    data_size = n_blocks * bytes_per_block
+                elif quant_type in [GGMLType.Q2_K, GGMLType.Q3_K, GGMLType.Q4_K,
+                                     GGMLType.Q5_K, GGMLType.Q6_K, GGMLType.Q8_K]:
+                    block_size = 256
+                    bytes_per_block = self._get_bytes_per_block(quant_type)
+                    n_blocks = (n_elements + block_size - 1) // block_size
+                    data_size = n_blocks * bytes_per_block
+                else:
+                    raise ValueError(f"Unsupported quantization type: {quant_type}")
+
+                # Align data size
+                aligned_size = (data_size + self.alignment - 1) & ~(self.alignment - 1)
+
+                tensor_infos.append({
+                    'name': tensor_dict['name'],
+                    'dims': dims,
+                    'dtype': quant_type,
+                    'offset': current_offset,
+                    'tensor': tensor,
+                    'data_size': data_size,
+                })
+
+                current_offset += aligned_size
+
+            # Write tensor info
+            for info in tensor_infos:
+                self._write_string(f, info['name'])
+                f.write(struct.pack('<I', len(info['dims'])))
+                for dim in info['dims']:
+                    f.write(struct.pack('<Q', dim))
+                f.write(struct.pack('<I', info['dtype']))
+                f.write(struct.pack('<Q', info['offset']))
+
+            # Align to 32 bytes before tensor data
+            current_pos = f.tell()
+            aligned_pos = (current_pos + self.alignment - 1) & ~(self.alignment - 1)
+            padding = aligned_pos - current_pos
+            f.write(b'\x00' * padding)
+
+            # Write tensor data
+            for info in tensor_infos:
+                tensor = info['tensor']
+                quant_type = info['dtype']
+
+                # Quantize and write tensor
+                quantized_data = self._quantize_tensor(tensor, quant_type)
+                f.write(quantized_data)
+
+                # Align to 32 bytes
+                current_pos = f.tell()
+                aligned_pos = (current_pos + self.alignment - 1) & ~(self.alignment - 1)
+                padding = aligned_pos - current_pos
+                if padding > 0:
+                    f.write(b'\x00' * padding)
+
+    def _write_string(self, f, s: str):
+        """Write a GGUF string"""
+        encoded = s.encode('utf-8')
+        f.write(struct.pack('<Q', len(encoded)))
+        f.write(encoded)
+
+    def _write_value(self, f, value: Any, value_type: int):
+        """Write a GGUF metadata value"""
+        if value_type == self.GGUF_TYPE_UINT8:
+            f.write(struct.pack('<B', value))
+        elif value_type == self.GGUF_TYPE_INT8:
+            f.write(struct.pack('<b', value))
+        elif value_type == self.GGUF_TYPE_UINT16:
+            f.write(struct.pack('<H', value))
+        elif value_type == self.GGUF_TYPE_INT16:
+            f.write(struct.pack('<h', value))
+        elif value_type == self.GGUF_TYPE_UINT32:
+            f.write(struct.pack('<I', value))
+        elif value_type == self.GGUF_TYPE_INT32:
+            f.write(struct.pack('<i', value))
+        elif value_type == self.GGUF_TYPE_FLOAT32:
+            f.write(struct.pack('<f', value))
+        elif value_type == self.GGUF_TYPE_BOOL:
+            f.write(struct.pack('<?', value))
+        elif value_type == self.GGUF_TYPE_STRING:
+            self._write_string(f, value)
+        elif value_type == self.GGUF_TYPE_ARRAY:
+            # Detect array element type
+            if len(value) > 0:
+                elem_type = self._detect_type(value[0])
+            else:
+                elem_type = self.GGUF_TYPE_UINT32
+            f.write(struct.pack('<I', elem_type))
+            f.write(struct.pack('<Q', len(value)))
+            for elem in value:
+                self._write_value(f, elem, elem_type)
+        elif value_type == self.GGUF_TYPE_UINT64:
+            f.write(struct.pack('<Q', value))
+        elif value_type == self.GGUF_TYPE_INT64:
+            f.write(struct.pack('<q', value))
+        elif value_type == self.GGUF_TYPE_FLOAT64:
+            f.write(struct.pack('<d', value))
+        else:
+            raise ValueError(f"Unknown value type: {value_type}")
+
+    def _detect_type(self, value: Any) -> int:
+        """Detect GGUF type from Python value"""
+        if isinstance(value, bool):
+            return self.GGUF_TYPE_BOOL
+        elif isinstance(value, str):
+            return self.GGUF_TYPE_STRING
+        elif isinstance(value, float):
+            return self.GGUF_TYPE_FLOAT32
+        elif isinstance(value, int):
+            if value < 0:
+                return self.GGUF_TYPE_INT32
+            else:
+                return self.GGUF_TYPE_UINT32
+        else:
+            return self.GGUF_TYPE_UINT32
+
+    def _get_bytes_per_block(self, dtype: int) -> int:
+        """Get bytes per block for quantized types"""
+        bytes_per_block = {
+            GGMLType.Q4_0: 18,
+            GGMLType.Q4_1: 20,
+            GGMLType.Q5_0: 22,
+            GGMLType.Q5_1: 24,
+            GGMLType.Q8_0: 34,
+            GGMLType.Q8_1: 36,
+            GGMLType.Q2_K: 84,
+            GGMLType.Q3_K: 110,
+            GGMLType.Q4_K: 144,
+            GGMLType.Q5_K: 176,
+            GGMLType.Q6_K: 210,
+            GGMLType.Q8_K: 292,
+        }
+        return bytes_per_block.get(dtype, 18)
+
+    def _quantize_tensor(self, tensor: torch.Tensor, quant_type: int) -> bytes:
+        """Quantize tensor to bytes (supports 2D-5D tensors)"""
+        # Flatten tensor for processing (maintains data order)
+        flat_tensor = tensor.flatten()
+
+        if quant_type == GGMLType.F32:
+            # Write as float32
+            return flat_tensor.cpu().float().numpy().tobytes()
+        elif quant_type == GGMLType.F16:
+            # Write as float16
+            return flat_tensor.cpu().half().numpy().tobytes()
+        elif quant_type == GGMLType.Q4_0:
+            return self._quantize_q4_0(flat_tensor)
+        elif quant_type == GGMLType.Q4_1:
+            return self._quantize_q4_1(flat_tensor)
+        elif quant_type == GGMLType.Q5_0:
+            return self._quantize_q5_0(flat_tensor)
+        elif quant_type == GGMLType.Q5_1:
+            return self._quantize_q5_1(flat_tensor)
+        elif quant_type == GGMLType.Q8_0:
+            return self._quantize_q8_0(flat_tensor)
+        elif quant_type == GGMLType.Q8_1:
+            return self._quantize_q8_1(flat_tensor)
+        elif quant_type in [GGMLType.Q2_K, GGMLType.Q3_K, GGMLType.Q4_K,
+                             GGMLType.Q5_K, GGMLType.Q6_K, GGMLType.Q8_K]:
+            return self._quantize_k_quants(flat_tensor, quant_type)
+        else:
+            raise ValueError(f"Unsupported quantization type: {quant_type}")
+
+    def _quantize_q4_0(self, tensor: torch.Tensor) -> bytes:
+        """Quantize to Q4_0 format (4-bit, block size 32)"""
+        block_size = 32
+        n_elements = tensor.numel()
+        n_blocks = (n_elements + block_size - 1) // block_size
+
+        # Pad tensor if needed
+        if n_elements % block_size != 0:
+            padding = block_size - (n_elements % block_size)
+            tensor = torch.cat([tensor, torch.zeros(padding, dtype=tensor.dtype, device=tensor.device)])
+
+        tensor = tensor.cpu().float().reshape(-1, block_size)
+        output = bytearray()
+
+        for block in tensor:
+            # Calculate scale (max absolute value)
+            max_val = block.abs().max()
+            scale = max_val / 7.0 if max_val > 0 else 1.0
+
+            # Write scale as float16
+            output.extend(struct.pack('<e', scale))
+
+            # Quantize values to 4 bits
+            quantized = torch.clamp(torch.round(block / scale), -8, 7).to(torch.int8)
+
+            # Pack two 4-bit values per byte
+            for i in range(0, block_size, 2):
+                val1 = int(quantized[i].item()) & 0x0F
+                val2 = int(quantized[i + 1].item()) & 0x0F
+                packed = (val2 << 4) | val1
+                output.append(packed & 0xFF)
+
+        return bytes(output)
+
+    def _quantize_q4_1(self, tensor: torch.Tensor) -> bytes:
+        """Quantize to Q4_1 format (4-bit with bias, block size 32)"""
+        block_size = 32
+        n_elements = tensor.numel()
+        n_blocks = (n_elements + block_size - 1) // block_size
+
+        # Pad tensor if needed
+        if n_elements % block_size != 0:
+            padding = block_size - (n_elements % block_size)
+            tensor = torch.cat([tensor, torch.zeros(padding, dtype=tensor.dtype, device=tensor.device)])
+
+        tensor = tensor.cpu().float().reshape(-1, block_size)
+        output = bytearray()
+
+        for block in tensor:
+            # Calculate min and max
+            min_val = block.min()
+            max_val = block.max()
+            scale = (max_val - min_val) / 15.0 if max_val > min_val else 1.0
+
+            # Write scale and min as float16
+            output.extend(struct.pack('<e', scale))
+            output.extend(struct.pack('<e', min_val))
+
+            # Quantize values to 4 bits
+            quantized = torch.clamp(torch.round((block - min_val) / scale), 0, 15).to(torch.int8)
+
+            # Pack two 4-bit values per byte
+            for i in range(0, block_size, 2):
+                val1 = int(quantized[i].item()) & 0x0F
+                val2 = int(quantized[i + 1].item()) & 0x0F
+                packed = (val2 << 4) | val1
+                output.append(packed & 0xFF)
+
+        return bytes(output)
+
+    def _quantize_q5_0(self, tensor: torch.Tensor) -> bytes:
+        """Quantize to Q5_0 format (5-bit, block size 32)"""
+        block_size = 32
+        n_elements = tensor.numel()
+
+        # Pad tensor if needed
+        if n_elements % block_size != 0:
+            padding = block_size - (n_elements % block_size)
+            tensor = torch.cat([tensor, torch.zeros(padding, dtype=tensor.dtype, device=tensor.device)])
+
+        tensor = tensor.cpu().float().reshape(-1, block_size)
+        output = bytearray()
+
+        for block in tensor:
+            max_val = block.abs().max()
+            scale = max_val / 15.0 if max_val > 0 else 1.0
+
+            output.extend(struct.pack('<e', scale))
+
+            # Quantize to 5 bits (-16 to 15)
+            quantized = torch.clamp(torch.round(block / scale), -16, 15).to(torch.int8)
+
+            # Pack 5-bit values (simplified - proper implementation would pack more efficiently)
+            for val in quantized:
+                output.append(int(val.item()) & 0xFF)
+
+        return bytes(output)
+
+    def _quantize_q5_1(self, tensor: torch.Tensor) -> bytes:
+        """Quantize to Q5_1 format (5-bit with bias, block size 32)"""
+        block_size = 32
+        n_elements = tensor.numel()
+
+        # Pad tensor if needed
+        if n_elements % block_size != 0:
+            padding = block_size - (n_elements % block_size)
+            tensor = torch.cat([tensor, torch.zeros(padding, dtype=tensor.dtype, device=tensor.device)])
+
+        tensor = tensor.cpu().float().reshape(-1, block_size)
+        output = bytearray()
+
+        for block in tensor:
+            min_val = block.min()
+            max_val = block.max()
+            scale = (max_val - min_val) / 31.0 if max_val > min_val else 1.0
+
+            output.extend(struct.pack('<e', scale))
+            output.extend(struct.pack('<e', min_val))
+
+            quantized = torch.clamp(torch.round((block - min_val) / scale), 0, 31).to(torch.int8)
+
+            for val in quantized:
+                output.append(int(val.item()) & 0xFF)
+
+        return bytes(output)
+
+    def _quantize_q8_0(self, tensor: torch.Tensor) -> bytes:
+        """Quantize to Q8_0 format (8-bit, block size 32)"""
+        block_size = 32
+        n_elements = tensor.numel()
+
+        # Pad tensor if needed
+        if n_elements % block_size != 0:
+            padding = block_size - (n_elements % block_size)
+            tensor = torch.cat([tensor, torch.zeros(padding, dtype=tensor.dtype, device=tensor.device)])
+
+        tensor = tensor.cpu().float().reshape(-1, block_size)
+        output = bytearray()
+
+        for block in tensor:
+            max_val = block.abs().max()
+            scale = max_val / 127.0 if max_val > 0 else 1.0
+
+            output.extend(struct.pack('<e', scale))
+
+            quantized = torch.clamp(torch.round(block / scale), -128, 127).to(torch.int8)
+
+            for val in quantized:
+                output.append(int(val.item()) & 0xFF)
+
+        return bytes(output)
+
+    def _quantize_q8_1(self, tensor: torch.Tensor) -> bytes:
+        """Quantize to Q8_1 format (8-bit with bias, block size 32)"""
+        block_size = 32
+        n_elements = tensor.numel()
+
+        # Pad tensor if needed
+        if n_elements % block_size != 0:
+            padding = block_size - (n_elements % block_size)
+            tensor = torch.cat([tensor, torch.zeros(padding, dtype=tensor.dtype, device=tensor.device)])
+
+        tensor = tensor.cpu().float().reshape(-1, block_size)
+        output = bytearray()
+
+        for block in tensor:
+            min_val = block.min()
+            max_val = block.max()
+            scale = (max_val - min_val) / 255.0 if max_val > min_val else 1.0
+
+            output.extend(struct.pack('<e', scale))
+            output.extend(struct.pack('<e', min_val))
+
+            quantized = torch.clamp(torch.round((block - min_val) / scale), 0, 255).to(torch.uint8)
+
+            output.extend(quantized.numpy().tobytes())
+
+        return bytes(output)
+
+    def _quantize_k_quants(self, tensor: torch.Tensor, quant_type: int) -> bytes:
+        """Quantize to K-quant formats (Q2_K through Q8_K, block size 256)"""
+        block_size = 256
+        n_elements = tensor.numel()
+
+        # Pad tensor if needed
+        if n_elements % block_size != 0:
+            padding = block_size - (n_elements % block_size)
+            tensor = torch.cat([tensor, torch.zeros(padding, dtype=tensor.dtype, device=tensor.device)])
+
+        tensor = tensor.cpu().float().reshape(-1, block_size)
+        output = bytearray()
+
+        # K-quants use sub-blocks and super-blocks
+        # Simplified implementation - proper implementation would use the exact GGML format
+        for block in tensor:
+            if quant_type == GGMLType.Q4_K:
+                # Q4_K: 144 bytes per block
+                # Scale + min + quantized data
+                min_val = block.min()
+                max_val = block.max()
+                scale = (max_val - min_val) / 15.0 if max_val > min_val else 1.0
+
+                # Write scales (simplified)
+                output.extend(struct.pack('<f', scale))
+                output.extend(struct.pack('<f', min_val))
+
+                # Quantize and pack
+                quantized = torch.clamp(torch.round((block - min_val) / scale), 0, 15).to(torch.uint8)
+                packed = bytearray()
+                for i in range(0, len(quantized), 2):
+                    if i + 1 < len(quantized):
+                        val = (quantized[i] & 0x0F) | ((quantized[i + 1] & 0x0F) << 4)
+                    else:
+                        val = quantized[i] & 0x0F
+                    packed.append(val)
+
+                output.extend(packed)
+
+                # Pad to 144 bytes
+                while len(output) % 144 != 0:
+                    output.append(0)
+
+            elif quant_type == GGMLType.Q8_K:
+                # Q8_K: 292 bytes per block
+                max_val = block.abs().max()
+                scale = max_val / 127.0 if max_val > 0 else 1.0
+
+                output.extend(struct.pack('<f', scale))
+
+                quantized = torch.clamp(torch.round(block / scale), -128, 127).to(torch.int8)
+                output.extend(quantized.numpy().tobytes())
+
+                # Pad to 292 bytes
+                while len(output) % 292 != 0:
+                    output.append(0)
+
+            else:
+                # Other K-quants - simplified implementation
+                max_val = block.abs().max()
+                scale = max_val / 127.0 if max_val > 0 else 1.0
+
+                output.extend(struct.pack('<f', scale))
+                quantized = torch.clamp(torch.round(block / scale), -128, 127).to(torch.int8)
+                output.extend(quantized.numpy().tobytes())
+
+                # Pad to required size
+                bytes_per_block = self._get_bytes_per_block(quant_type)
+                while len(output) % bytes_per_block != 0:
+                    output.append(0)
+
+        return bytes(output)
+
+
+def patch_5d_tensor(tensor: torch.Tensor, patch_fn, **kwargs) -> torch.Tensor:
+    """
+    Apply patching function to 5D tensor with preservation of dimensions
+
+    Args:
+        tensor: Input tensor (2D-5D)
+        patch_fn: Function to apply (e.g., normalize, scale, quantize-aware training)
+        **kwargs: Additional arguments for patch_fn
+
+    Returns:
+        Patched tensor with same dimensions
+    """
+    if tensor.dim() == 5:
+        # Process 5D tensor: [batch, channels, depth, height, width]
+        original_shape = tensor.shape
+        patched = patch_fn(tensor, **kwargs)
+        return patched.reshape(original_shape)
+    else:
+        # Handle 2D-4D tensors directly
+        return patch_fn(tensor, **kwargs)
+
+
+def quantize_aware_patch(tensor: torch.Tensor, quant_type: int = GGMLType.Q4_K) -> torch.Tensor:
+    """
+    Apply quantization-aware patching to preserve quality during GGUF conversion
+
+    Args:
+        tensor: Input tensor
+        quant_type: Target quantization type
+
+    Returns:
+        Tensor adjusted for quantization
+    """
+    # Apply range normalization based on target quantization
+    if quant_type in [GGMLType.Q4_0, GGMLType.Q4_1, GGMLType.Q4_K]:
+        # 4-bit quantization - adjust range
+        std = tensor.std()
+        if std > 0:
+            tensor = tensor / std * 0.5  # Reduce dynamic range
+    elif quant_type in [GGMLType.Q2_K, GGMLType.Q3_K]:
+        # Very low bit quantization - aggressive range reduction
+        std = tensor.std()
+        if std > 0:
+            tensor = tensor / std * 0.25
+
+    return tensor

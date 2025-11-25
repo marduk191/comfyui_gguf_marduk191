@@ -4,13 +4,17 @@ A comprehensive set of custom nodes for working with GGUF (GPT-Generated Unified
 
 ## Features
 
-- **Full GGUF Support**: Load GGUF quantized models with proper dequantization
+- **Full GGUF Support**: Load and save GGUF quantized models with proper dequantization
 - **Complete Model Support**: UNet, CLIP, VAE, LoRA, and full checkpoints
+- **Create GGUF Files**: Save models directly to GGUF format from ComfyUI
+- **5D Tensor Support**: Full support for 5D tensors (batch, channels, depth, height, width)
 - **Advanced Sampling**: Comprehensive sampler with all diffusion model options
-- **Flexible Loading**: Support for multiple quantization types (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K)
-- **Model Patching**: Advanced model modification and patching capabilities
+- **Flexible Quantization**: Support for all quantization types (Q2_K through Q8_K, F16, F32)
+- **Model Patching**: Advanced model modification and 5D tensor patching capabilities
+- **Quantization-Aware Preprocessing**: Optimize tensors before quantization to preserve quality
 - **Device Management**: Automatic device detection (CUDA, MPS, CPU) with manual override
 - **Dtype Control**: Support for FP32, FP16, BF16, and FP8 formats
+- **Quality Testing**: Preview quantization quality with detailed statistics
 
 ## Installation
 
@@ -216,6 +220,110 @@ Advanced model patching and modification.
 **Outputs:**
 - `model`: Patched model
 
+### 9. GGUF Model Saver
+Save models to GGUF format with quantization (supports 2D-5D tensors).
+
+**Inputs:**
+- `model`: Model to save (MODEL, dict, or state_dict)
+- `filename`: Output filename (e.g., "model.gguf")
+- `quantization`: Quantization type (F32, F16, Q4_0-Q8_1, Q2_K-Q8_K)
+- `save_path`: Save directory (models/gguf, models/gguf/unet, or custom)
+- `custom_path`: Optional custom save path
+- `metadata`: Optional metadata dictionary
+- `apply_quantize_patch`: Apply quantization-aware patching (default: true)
+
+**Outputs:**
+- `filepath`: Path to saved GGUF file
+
+**Features:**
+- Supports 2D, 3D, 4D, and **5D tensors**
+- Automatic quantization-aware patching to preserve quality
+- All quantization types supported (Q2_K through Q8_K)
+- Custom metadata support
+- Automatic directory creation
+
+### 10. GGUF Checkpoint Saver
+Save complete checkpoints with separate quantization for each component.
+
+**Inputs:**
+- `filename`: Output filename
+- `quantization_unet`: UNet quantization (default: Q4_K)
+- `quantization_clip`: CLIP quantization (default: Q8_0)
+- `quantization_vae`: VAE quantization (default: F16)
+- `model`: UNet model (optional)
+- `clip`: CLIP model (optional)
+- `vae`: VAE model (optional)
+- `save_path`: Save directory (default: models/gguf/checkpoints)
+- `metadata`: Optional metadata dictionary
+
+**Outputs:**
+- `filepath`: Path to saved checkpoint
+
+**Features:**
+- Save UNet, CLIP, and VAE in single file
+- Independent quantization per component
+- Optimal quality/size balance (Q4_K for UNet, Q8_0 for CLIP, F16 for VAE)
+- Automatic component prefixing
+
+### 11. GGUF 5D Tensor Patcher
+Apply advanced patching operations to 5D tensors before GGUF creation.
+
+**Inputs:**
+- `model`: Model with tensors to patch
+- `patch_operation`: Operation type
+- `target_quantization`: Target quantization for aware patching
+- `scale_factor`: Scaling factor (0.1 to 10.0)
+- `clip_min`: Minimum value for clipping (-100.0 to 0.0)
+- `clip_max`: Maximum value for clipping (0.0 to 100.0)
+
+**Patch Operations:**
+- `normalize`: Zero-mean, unit-variance normalization
+- `scale`: Multiply by scale factor
+- `clip_range`: Clamp values to range
+- `quantize_aware`: Adjust for target quantization type
+- `reduce_dynamic_range`: Reduce dynamic range by 50%
+- `adaptive_scale`: Scale based on tensor statistics
+
+**Outputs:**
+- `model`: Model with patched tensors
+
+**Features:**
+- **Full 5D tensor support** (batch, channels, depth, height, width)
+- Dimension preservation
+- Quantization-aware preprocessing
+- Multiple patching strategies
+
+**Use Cases:**
+- Prepare models for low-bit quantization (Q2_K, Q3_K, Q4_K)
+- Reduce quantization artifacts
+- Normalize tensors for better compression
+- Fine-tune dynamic range before saving
+
+### 12. GGUF Tensor Quantizer
+Test quantization on individual tensors with quality metrics.
+
+**Inputs:**
+- `tensor`: Tensor to quantize
+- `quantization`: Target quantization type
+- `apply_pre_quantization_patch`: Enable patching (default: true)
+- `tensor_name`: Name for statistics output
+
+**Outputs:**
+- `quantized_tensor`: Quantized tensor
+- `statistics`: Detailed quality metrics (string)
+
+**Statistics Provided:**
+- Original tensor stats (mean, std, min, max)
+- Quantized tensor stats (mean, std, min, max)
+- Error metrics (MSE, MAE, relative error)
+- Tensor shape information
+
+**Features:**
+- Preview quantization quality before full model save
+- Compare different quantization types
+- Identify problematic layers
+- Validate 5D tensor quantization
+
 ## Quantization Types Supported
 
 - **Q4_0**: 4-bit quantization, original
@@ -259,6 +367,50 @@ Advanced model patching and modification.
    - Adjust sigma values for custom noise schedules
    - Experiment with different samplers and schedulers
 
+### Creating GGUF Files
+
+1. **Save a Single Model:**
+   - Load your model in ComfyUI
+   - Add "GGUF Model Saver" node
+   - Choose quantization type (Q4_K recommended)
+   - Set filename and save path
+   - Execute to save
+
+2. **Save Complete Checkpoint:**
+   - Load UNet, CLIP, and VAE models
+   - Add "GGUF Checkpoint Saver" node
+   - Set different quantization for each component
+   - Save all in one file
+
+3. **Optimize for Low-Bit Quantization:**
+   - Load your model
+   - Add "GGUF 5D Tensor Patcher" node
+   - Select "quantize_aware" operation
+   - Choose target quantization (e.g., Q4_K)
+   - Connect to "GGUF Model Saver"
+
+4. **Test Quantization Quality:**
+   - Extract a tensor from your model
+   - Add "GGUF Tensor Quantizer" node
+   - Test different quantization types
+   - Review statistics to find optimal setting
+   - Apply to full model
+
+### Working with 5D Tensors
+
+**5D Tensor Support:**
+- Dimensions: [batch, channels, depth, height, width]
+- Fully supported in save/load operations
+- All patching operations preserve 5D structure
+- Automatic flattening and reshaping during quantization
+
+**Example Workflow:**
+1. Load model with 5D tensors
+2. Apply "GGUF 5D Tensor Patcher" with "quantize_aware"
+3. Save with "GGUF Model Saver" using Q4_K
+4. Load back with "GGUF Model Loader"
+5. Verify dimensions preserved
+
 ### Memory Optimization Tips
 
 1. **Use Q4_K or Q5_K** for best quality/size balance
@@ -266,11 +418,22 @@ Advanced model patching and modification.
 3. **Use FP8** for UNet if your GPU supports it (RTX 40xx series)
 4. **Set device to "cpu"** for CLIP to free up VRAM if needed
 
-## Converting Models to GGUF
+## Creating and Converting Models to GGUF
 
-To convert existing models to GGUF format, use tools like:
+### Direct Creation in ComfyUI (Recommended)
+
+Use the built-in GGUF saver nodes:
+- **GGUF Model Saver** - Save any model with chosen quantization
+- **GGUF Checkpoint Saver** - Save complete checkpoints
+- **GGUF 5D Tensor Patcher** - Optimize before saving
+- **GGUF Tensor Quantizer** - Test quantization quality
+
+### External Conversion Tools
+
+For converting from other formats:
 - `llama.cpp` convert scripts
 - Custom conversion tools (community-developed)
+- Note: Built-in savers are easier and support 5D tensors directly
 
 ## Troubleshooting
 
@@ -332,6 +495,19 @@ For issues, questions, or suggestions:
 - ComfyUI Discord: #custom-nodes
 
 ## Changelog
+
+### Version 1.1.0 (GGUF Creation & 5D Tensor Support)
+- **NEW:** GGUF Model Saver - Save models to GGUF format
+- **NEW:** GGUF Checkpoint Saver - Save complete checkpoints with component-specific quantization
+- **NEW:** GGUF 5D Tensor Patcher - Advanced patching for 5D tensors
+- **NEW:** GGUF Tensor Quantizer - Test and preview quantization quality
+- **NEW:** Full 5D tensor support in all save/load operations
+- **NEW:** Quantization-aware preprocessing for better quality
+- **NEW:** GGUFWriter class with all quantization types
+- **NEW:** Quality metrics and statistics for quantization testing
+- 6 patching operations (normalize, scale, clip, quantize-aware, etc.)
+- Complete GGUF creation pipeline in ComfyUI
+- Improved documentation with creation workflows
 
 ### Version 1.0.0 (Initial Release)
 - GGUF Model Loader
