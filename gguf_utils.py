@@ -317,7 +317,9 @@ class GGUFWriter:
         })
 
     def save(self):
-        """Write GGUF file to disk"""
+        """Write GGUF file to disk with memory-efficient streaming"""
+        import gc
+
         with open(self.filepath, 'wb') as f:
             # Write header
             f.write(struct.pack('<I', GGUF_MAGIC))
@@ -331,7 +333,7 @@ class GGUFWriter:
                 f.write(struct.pack('<I', value_type))
                 self._write_value(f, value, value_type)
 
-            # Calculate tensor data offsets
+            # Calculate tensor data offsets (but don't store full tensors yet)
             tensor_infos = []
             current_offset = 0
 
@@ -371,7 +373,7 @@ class GGUFWriter:
                     'dims': dims,
                     'dtype': quant_type,
                     'offset': current_offset,
-                    'tensor': tensor,
+                    'tensor_index': len(tensor_infos),  # Reference to original tensor
                     'data_size': data_size,
                 })
 
@@ -392,14 +394,23 @@ class GGUFWriter:
             padding = aligned_pos - current_pos
             f.write(b'\x00' * padding)
 
-            # Write tensor data
+            # Write tensor data one at a time to save memory
             for info in tensor_infos:
-                tensor = info['tensor']
+                tensor_idx = info['tensor_index']
+                tensor = self.tensors[tensor_idx]['tensor']
                 quant_type = info['dtype']
 
+                # Move tensor to CPU if on GPU to save VRAM
+                if tensor.is_cuda:
+                    tensor = tensor.cpu()
+
                 # Quantize and write tensor
-                quantized_data = self._quantize_tensor(tensor, quant_type)
-                f.write(quantized_data)
+                with torch.no_grad():  # Disable gradient tracking to save memory
+                    quantized_data = self._quantize_tensor(tensor, quant_type)
+                    f.write(quantized_data)
+
+                # Force cleanup of quantized data
+                del quantized_data
 
                 # Align to 32 bytes
                 current_pos = f.tell()
@@ -407,6 +418,13 @@ class GGUFWriter:
                 padding = aligned_pos - current_pos
                 if padding > 0:
                     f.write(b'\x00' * padding)
+
+                # Clear tensor from memory if possible (don't modify original)
+                # Periodic garbage collection
+                if tensor_idx % 10 == 0:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
     def _write_string(self, f, s: str):
         """Write a GGUF string"""
