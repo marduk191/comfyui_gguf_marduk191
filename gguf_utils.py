@@ -301,9 +301,14 @@ class GGUFWriter:
         self.metadata[key] = (value, value_type)
 
     def add_tensor(self, name: str, tensor: torch.Tensor, quantization_type: int = GGMLType.F32):
-        """Add a tensor to be written (supports 2D-5D tensors)"""
-        if tensor.dim() < 2 or tensor.dim() > 5:
-            raise ValueError(f"Tensor {name} must be 2D-5D, got {tensor.dim()}D")
+        """Add a tensor to be written (supports 1D-5D tensors)"""
+        if tensor.dim() < 1 or tensor.dim() > 5:
+            raise ValueError(f"Tensor {name} must be 1D-5D, got {tensor.dim()}D")
+
+        # For 1D tensors (biases, norms), force F32 or F16 to avoid quantization issues
+        if tensor.dim() == 1 and quantization_type not in [GGMLType.F32, GGMLType.F16]:
+            print(f"Warning: 1D tensor '{name}' forced to F16 (was {quantization_type})")
+            quantization_type = GGMLType.F16
 
         self.tensors.append({
             'name': name,
