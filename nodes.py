@@ -12,6 +12,38 @@ from .gguf_utils import (
 )
 
 
+def extract_state_dict(model):
+    """
+    Extract state dict from various model types including ComfyUI ModelPatcher objects
+    """
+    state_dict = None
+
+    # Try to extract state dict from various model types
+    if hasattr(model, 'model'):
+        # ComfyUI ModelPatcher object
+        if hasattr(model.model, 'diffusion_model') and hasattr(model.model.diffusion_model, 'state_dict'):
+            state_dict = model.model.diffusion_model.state_dict()
+        elif hasattr(model.model, 'state_dict') and callable(model.model.state_dict):
+            state_dict = model.model.state_dict()
+        elif callable(getattr(model, 'model_state_dict', None)):
+            state_dict = model.model_state_dict()
+        else:
+            state_dict = model.model
+    elif isinstance(model, dict):
+        state_dict = model
+    elif hasattr(model, 'state_dict') and callable(model.state_dict):
+        state_dict = model.state_dict()
+    else:
+        # Assume it's already a state dict
+        state_dict = model
+
+    # Ensure we have a valid state dict
+    if state_dict is None or not hasattr(state_dict, 'items'):
+        raise ValueError(f"Cannot extract state dict from model type: {type(model)}")
+
+    return state_dict
+
+
 class GGUFModelLoader:
     """Load a GGUF quantized model file"""
 
@@ -475,16 +507,8 @@ class GGUFModelSaver:
         writer.add_metadata("quantization_version", 2)
         writer.add_metadata("file_type", quantization)
 
-        # Extract tensors from model
-        if isinstance(model, dict):
-            state_dict = model
-        elif hasattr(model, 'state_dict'):
-            state_dict = model.state_dict()
-        elif hasattr(model, 'model') and hasattr(model.model, 'state_dict'):
-            state_dict = model.model.state_dict()
-        else:
-            # Assume it's already a state dict
-            state_dict = model
+        # Extract tensors from model - handle ComfyUI ModelPatcher objects
+        state_dict = extract_state_dict(model)
 
         # Add tensors with quantization
         for name, tensor in state_dict.items():
@@ -570,30 +594,33 @@ class GGUFCheckpointSaver:
 
         # Add model tensors
         if model is not None:
-            state_dict = model if isinstance(model, dict) else (
-                model.state_dict() if hasattr(model, 'state_dict') else model
-            )
-            for name, tensor in state_dict.items():
-                if isinstance(tensor, torch.Tensor):
-                    writer.add_tensor(f"model.{name}", tensor, quant_map[quantization_unet])
+            try:
+                state_dict = extract_state_dict(model)
+                for name, tensor in state_dict.items():
+                    if isinstance(tensor, torch.Tensor):
+                        writer.add_tensor(f"model.{name}", tensor, quant_map[quantization_unet])
+            except Exception as e:
+                print(f"Warning: Could not extract model state dict: {e}")
 
         # Add CLIP tensors
         if clip is not None:
-            state_dict = clip if isinstance(clip, dict) else (
-                clip.state_dict() if hasattr(clip, 'state_dict') else clip
-            )
-            for name, tensor in state_dict.items():
-                if isinstance(tensor, torch.Tensor):
-                    writer.add_tensor(f"clip.{name}", tensor, quant_map[quantization_clip])
+            try:
+                state_dict = extract_state_dict(clip)
+                for name, tensor in state_dict.items():
+                    if isinstance(tensor, torch.Tensor):
+                        writer.add_tensor(f"clip.{name}", tensor, quant_map[quantization_clip])
+            except Exception as e:
+                print(f"Warning: Could not extract CLIP state dict: {e}")
 
         # Add VAE tensors
         if vae is not None:
-            state_dict = vae if isinstance(vae, dict) else (
-                vae.state_dict() if hasattr(vae, 'state_dict') else vae
-            )
-            for name, tensor in state_dict.items():
-                if isinstance(tensor, torch.Tensor):
-                    writer.add_tensor(f"vae.{name}", tensor, quant_map[quantization_vae])
+            try:
+                state_dict = extract_state_dict(vae)
+                for name, tensor in state_dict.items():
+                    if isinstance(tensor, torch.Tensor):
+                        writer.add_tensor(f"vae.{name}", tensor, quant_map[quantization_vae])
+            except Exception as e:
+                print(f"Warning: Could not extract VAE state dict: {e}")
 
         # Save to file
         writer.save()
@@ -642,76 +669,163 @@ class GGUF5DTensorPatcher:
         }
         quant_type = quant_map[target_quantization]
 
-        # Extract state dict
-        if isinstance(model, dict):
-            state_dict = model
-        elif hasattr(model, 'state_dict'):
-            state_dict = model.state_dict()
-        else:
-            state_dict = model
+        # Handle ComfyUI ModelPatcher objects
+        if hasattr(model, 'model') and hasattr(model, 'clone'):
+            # This is a ComfyUI ModelPatcher - clone it and patch the internal model
+            patched_model = model.clone()
 
-        patched_state_dict = {}
-
-        # Apply patching to each tensor
-        for name, tensor in state_dict.items():
-            if not isinstance(tensor, torch.Tensor):
-                patched_state_dict[name] = tensor
-                continue
-
-            # Only patch 2D-5D tensors
-            if tensor.dim() < 2 or tensor.dim() > 5:
-                patched_state_dict[name] = tensor
-                continue
-
-            # Apply patch operation
-            if patch_operation == "normalize":
-                def normalize_fn(t):
-                    mean = t.mean()
-                    std = t.std()
-                    return (t - mean) / (std + 1e-8) if std > 0 else t
-                patched_tensor = patch_5d_tensor(tensor, normalize_fn)
-
-            elif patch_operation == "scale":
-                def scale_fn(t):
-                    return t * scale_factor
-                patched_tensor = patch_5d_tensor(tensor, scale_fn)
-
-            elif patch_operation == "clip_range":
-                def clip_fn(t):
-                    return torch.clamp(t, clip_min, clip_max)
-                patched_tensor = patch_5d_tensor(tensor, clip_fn)
-
-            elif patch_operation == "quantize_aware":
-                def quant_aware_fn(t):
-                    return quantize_aware_patch(t, quant_type)
-                patched_tensor = patch_5d_tensor(tensor, quant_aware_fn)
-
-            elif patch_operation == "reduce_dynamic_range":
-                def reduce_range_fn(t):
-                    # Reduce dynamic range while preserving sign
-                    abs_max = t.abs().max()
-                    if abs_max > 0:
-                        target_max = abs_max * 0.5
-                        return t * (target_max / abs_max)
-                    return t
-                patched_tensor = patch_5d_tensor(tensor, reduce_range_fn)
-
-            elif patch_operation == "adaptive_scale":
-                def adaptive_fn(t):
-                    # Scale based on tensor statistics
-                    std = t.std()
-                    if std > 1.0:
-                        return t / std
-                    return t
-                patched_tensor = patch_5d_tensor(tensor, adaptive_fn)
-
+            # Get the actual model state dict
+            if hasattr(patched_model.model, 'state_dict'):
+                state_dict = patched_model.model.state_dict()
+            elif hasattr(patched_model.model, 'diffusion_model'):
+                state_dict = patched_model.model.diffusion_model.state_dict()
             else:
-                patched_tensor = tensor
+                # Fallback: try to get state dict directly
+                state_dict = patched_model.model
 
-            patched_state_dict[name] = patched_tensor
+            # Apply patching to each tensor
+            patched_tensors = {}
+            for name, tensor in state_dict.items():
+                if not isinstance(tensor, torch.Tensor):
+                    continue
 
-        print(f"Patched {len(patched_state_dict)} tensors with {patch_operation} operation")
-        return (patched_state_dict,)
+                # Only patch 2D-5D tensors
+                if tensor.dim() < 2 or tensor.dim() > 5:
+                    continue
+
+                # Apply patch operation
+                if patch_operation == "normalize":
+                    def normalize_fn(t):
+                        mean = t.mean()
+                        std = t.std()
+                        return (t - mean) / (std + 1e-8) if std > 0 else t
+                    patched_tensor = patch_5d_tensor(tensor, normalize_fn)
+
+                elif patch_operation == "scale":
+                    def scale_fn(t):
+                        return t * scale_factor
+                    patched_tensor = patch_5d_tensor(tensor, scale_fn)
+
+                elif patch_operation == "clip_range":
+                    def clip_fn(t):
+                        return torch.clamp(t, clip_min, clip_max)
+                    patched_tensor = patch_5d_tensor(tensor, clip_fn)
+
+                elif patch_operation == "quantize_aware":
+                    def quant_aware_fn(t):
+                        return quantize_aware_patch(t, quant_type)
+                    patched_tensor = patch_5d_tensor(tensor, quant_aware_fn)
+
+                elif patch_operation == "reduce_dynamic_range":
+                    def reduce_range_fn(t):
+                        # Reduce dynamic range while preserving sign
+                        abs_max = t.abs().max()
+                        if abs_max > 0:
+                            target_max = abs_max * 0.5
+                            return t * (target_max / abs_max)
+                        return t
+                    patched_tensor = patch_5d_tensor(tensor, reduce_range_fn)
+
+                elif patch_operation == "adaptive_scale":
+                    def adaptive_fn(t):
+                        # Scale based on tensor statistics
+                        std = t.std()
+                        if std > 1.0:
+                            return t / std
+                        return t
+                    patched_tensor = patch_5d_tensor(tensor, adaptive_fn)
+
+                else:
+                    patched_tensor = tensor
+
+                patched_tensors[name] = patched_tensor
+
+            # Apply patches to the model using ComfyUI's patching system
+            def patch_fn(model_function, params):
+                """Apply tensor patches during model execution"""
+                # This is called during model execution
+                return model_function
+
+            # Add patches to the ModelPatcher
+            for key in patched_tensors:
+                # Use ComfyUI's add_patches method if available
+                if hasattr(patched_model, 'add_patches'):
+                    patched_model.add_patches({key: (patched_tensors[key],)}, 1.0, 0.0)
+
+            print(f"Patched {len(patched_tensors)} tensors with {patch_operation} operation")
+            return (patched_model,)
+
+        else:
+            # Handle dict or state_dict directly (for standalone usage)
+            if isinstance(model, dict):
+                state_dict = model
+            elif hasattr(model, 'state_dict'):
+                state_dict = model.state_dict()
+            else:
+                state_dict = model
+
+            patched_state_dict = {}
+
+            # Apply patching to each tensor
+            for name, tensor in state_dict.items():
+                if not isinstance(tensor, torch.Tensor):
+                    patched_state_dict[name] = tensor
+                    continue
+
+                # Only patch 2D-5D tensors
+                if tensor.dim() < 2 or tensor.dim() > 5:
+                    patched_state_dict[name] = tensor
+                    continue
+
+                # Apply patch operation
+                if patch_operation == "normalize":
+                    def normalize_fn(t):
+                        mean = t.mean()
+                        std = t.std()
+                        return (t - mean) / (std + 1e-8) if std > 0 else t
+                    patched_tensor = patch_5d_tensor(tensor, normalize_fn)
+
+                elif patch_operation == "scale":
+                    def scale_fn(t):
+                        return t * scale_factor
+                    patched_tensor = patch_5d_tensor(tensor, scale_fn)
+
+                elif patch_operation == "clip_range":
+                    def clip_fn(t):
+                        return torch.clamp(t, clip_min, clip_max)
+                    patched_tensor = patch_5d_tensor(tensor, clip_fn)
+
+                elif patch_operation == "quantize_aware":
+                    def quant_aware_fn(t):
+                        return quantize_aware_patch(t, quant_type)
+                    patched_tensor = patch_5d_tensor(tensor, quant_aware_fn)
+
+                elif patch_operation == "reduce_dynamic_range":
+                    def reduce_range_fn(t):
+                        # Reduce dynamic range while preserving sign
+                        abs_max = t.abs().max()
+                        if abs_max > 0:
+                            target_max = abs_max * 0.5
+                            return t * (target_max / abs_max)
+                        return t
+                    patched_tensor = patch_5d_tensor(tensor, reduce_range_fn)
+
+                elif patch_operation == "adaptive_scale":
+                    def adaptive_fn(t):
+                        # Scale based on tensor statistics
+                        std = t.std()
+                        if std > 1.0:
+                            return t / std
+                        return t
+                    patched_tensor = patch_5d_tensor(tensor, adaptive_fn)
+
+                else:
+                    patched_tensor = tensor
+
+                patched_state_dict[name] = patched_tensor
+
+            print(f"Patched {len(patched_state_dict)} tensors with {patch_operation} operation")
+            return (patched_state_dict,)
 
 
 class GGUFTensorQuantizer:
