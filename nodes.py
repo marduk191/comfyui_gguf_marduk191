@@ -441,7 +441,7 @@ class GGUFModelPatcher:
 
 
 class GGUFModelSaver:
-    """Save models to GGUF format with quantization and 5D tensor support"""
+    """Save models to GGUF format with quantization (supports 1D-5D tensors)"""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -519,7 +519,7 @@ class GGUFModelSaver:
             if apply_quantize_patch and tensor.dim() >= 2:
                 tensor = quantize_aware_patch(tensor, quant_type)
 
-            # Add tensor (supports 2D-5D)
+            # Add tensor (supports 1D-5D, with 1D forced to F16)
             writer.add_tensor(name, tensor, quant_type)
 
         # Save to file
@@ -689,7 +689,7 @@ class GGUF5DTensorPatcher:
                 if not isinstance(tensor, torch.Tensor):
                     continue
 
-                # Only patch 2D-5D tensors
+                # Only patch 2D-5D tensors (skip 1D biases/norms as they don't benefit from patching)
                 if tensor.dim() < 2 or tensor.dim() > 5:
                     continue
 
@@ -772,7 +772,7 @@ class GGUF5DTensorPatcher:
                     patched_state_dict[name] = tensor
                     continue
 
-                # Only patch 2D-5D tensors
+                # Only patch 2D-5D tensors (skip 1D biases/norms as they don't benefit from patching)
                 if tensor.dim() < 2 or tensor.dim() > 5:
                     patched_state_dict[name] = tensor
                     continue
