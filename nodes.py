@@ -508,23 +508,26 @@ class GGUFModelSaver:
         writer.add_metadata("quantization_version", 2)
         writer.add_metadata("file_type", quantization)
 
-        # Extract tensors from model - handle ComfyUI ModelPatcher objects
+        # Extract state_dict to count tensors (minimal memory - just references)
         state_dict = extract_state_dict(model)
+        tensor_names = [name for name, tensor in state_dict.items() if isinstance(tensor, torch.Tensor)]
+        tensor_count = len(tensor_names)
 
-        # Add tensors with quantization
-        for name, tensor in state_dict.items():
-            if not isinstance(tensor, torch.Tensor):
-                continue
+        print(f"Streaming {tensor_count} tensors to GGUF (low memory mode)...")
 
-            # Apply quantization-aware patching if enabled
-            if apply_quantize_patch and tensor.dim() >= 2:
-                tensor = quantize_aware_patch(tensor, quant_type)
+        # Create generator that yields tensors one at a time
+        def tensor_generator():
+            for name in tensor_names:
+                tensor = state_dict[name]
 
-            # Add tensor (supports 1D-5D, with 1D forced to F16)
-            writer.add_tensor(name, tensor, quant_type)
+                # Apply quantization-aware patching if enabled
+                if apply_quantize_patch and tensor.dim() >= 2:
+                    tensor = quantize_aware_patch(tensor, quant_type)
 
-        # Save to file (with GPU acceleration if enabled)
-        writer.save(use_gpu=gpu_accelerated)
+                yield (name, tensor, quant_type)
+
+        # Use streaming save to minimize RAM usage
+        writer.save_streaming(tensor_generator(), tensor_count, use_gpu=gpu_accelerated)
 
         accel_msg = " (GPU accelerated)" if gpu_accelerated else ""
         print(f"Saved GGUF model to {filepath} with {quantization} quantization{accel_msg}")
@@ -595,38 +598,51 @@ class GGUFCheckpointSaver:
         writer.add_metadata("quantization_clip", quantization_clip)
         writer.add_metadata("quantization_vae", quantization_vae)
 
-        # Add model tensors
+        # Collect tensor names and info for streaming (minimal memory)
+        tensor_info = []  # List of (prefix, name, state_dict, quant_type)
+
+        # Collect model tensors
         if model is not None:
             try:
                 state_dict = extract_state_dict(model)
                 for name, tensor in state_dict.items():
                     if isinstance(tensor, torch.Tensor):
-                        writer.add_tensor(f"model.{name}", tensor, quant_map[quantization_unet])
+                        tensor_info.append(("model", name, state_dict, quant_map[quantization_unet]))
             except Exception as e:
                 print(f"Warning: Could not extract model state dict: {e}")
 
-        # Add CLIP tensors
+        # Collect CLIP tensors
         if clip is not None:
             try:
                 state_dict = extract_state_dict(clip)
                 for name, tensor in state_dict.items():
                     if isinstance(tensor, torch.Tensor):
-                        writer.add_tensor(f"clip.{name}", tensor, quant_map[quantization_clip])
+                        tensor_info.append(("clip", name, state_dict, quant_map[quantization_clip]))
             except Exception as e:
                 print(f"Warning: Could not extract CLIP state dict: {e}")
 
-        # Add VAE tensors
+        # Collect VAE tensors
         if vae is not None:
             try:
                 state_dict = extract_state_dict(vae)
                 for name, tensor in state_dict.items():
                     if isinstance(tensor, torch.Tensor):
-                        writer.add_tensor(f"vae.{name}", tensor, quant_map[quantization_vae])
+                        tensor_info.append(("vae", name, state_dict, quant_map[quantization_vae]))
             except Exception as e:
                 print(f"Warning: Could not extract VAE state dict: {e}")
 
-        # Save to file (with GPU acceleration if enabled)
-        writer.save(use_gpu=gpu_accelerated)
+        tensor_count = len(tensor_info)
+        print(f"Streaming {tensor_count} tensors from checkpoint (low memory mode)...")
+
+        # Create generator that yields tensors one at a time
+        def tensor_generator():
+            for prefix, name, state_dict, quant_type in tensor_info:
+                tensor = state_dict[name]
+                full_name = f"{prefix}.{name}"
+                yield (full_name, tensor, quant_type)
+
+        # Use streaming save to minimize RAM usage
+        writer.save_streaming(tensor_generator(), tensor_count, use_gpu=gpu_accelerated)
 
         accel_msg = " (GPU accelerated)" if gpu_accelerated else ""
         print(f"Saved GGUF checkpoint to {filepath}{accel_msg}")
