@@ -418,6 +418,43 @@ Test quantization on individual tensors with quality metrics.
 3. **Use FP8** for UNet if your GPU supports it (RTX 40xx series)
 4. **Set device to "cpu"** for CLIP to free up VRAM if needed
 
+## Example Workflows
+
+The `workflows/` directory contains 8 ready-to-use example workflows demonstrating all features:
+
+### Quick Start Workflows
+1. **01_basic_gguf_loading.json** - Load and use GGUF checkpoints
+2. **02_create_gguf_model.json** - Convert models to GGUF format
+3. **03_create_gguf_checkpoint.json** - Save complete optimized checkpoints
+
+### Advanced Workflows
+4. **04_5d_tensor_patching.json** - Optimize models with 5D tensor patching
+5. **05_quantization_quality_test.json** - Test and compare quantization quality
+6. **06_complete_optimization_workflow.json** - Full end-to-end pipeline
+
+### Specialized Workflows
+7. **07_load_individual_components.json** - Load UNet, CLIP, VAE separately
+8. **08_gguf_lora_workflow.json** - Use GGUF LoRAs with quantized models
+
+### How to Use Workflows
+
+1. **Import into ComfyUI:**
+   - Click "Load" in ComfyUI
+   - Navigate to `custom_nodes/comfyui_gguf_marduk191/workflows/`
+   - Select a workflow JSON file
+
+2. **Configure:**
+   - Update file paths to your models
+   - Adjust quantization settings as needed
+   - Modify prompts and parameters
+
+3. **Execute:**
+   - Click "Queue Prompt" to run
+   - Monitor progress in ComfyUI
+   - Check outputs
+
+📚 **See [workflows/README.md](workflows/README.md) for detailed documentation of each workflow!**
+
 ## Creating and Converting Models to GGUF
 
 ### Direct Creation in ComfyUI (Recommended)
@@ -505,9 +542,10 @@ For issues, questions, or suggestions:
 - **NEW:** Quantization-aware preprocessing for better quality
 - **NEW:** GGUFWriter class with all quantization types
 - **NEW:** Quality metrics and statistics for quantization testing
+- **NEW:** 8 example workflows demonstrating all features
 - 6 patching operations (normalize, scale, clip, quantize-aware, etc.)
 - Complete GGUF creation pipeline in ComfyUI
-- Improved documentation with creation workflows
+- Improved documentation with creation workflows and workflow guide
 
 ### Version 1.0.0 (Initial Release)
 - GGUF Model Loader

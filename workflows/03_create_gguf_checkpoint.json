@@ -1,0 +1,90 @@
+{
+  "last_node_id": 6,
+  "last_link_id": 4,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "CheckpointLoaderSimple",
+      "pos": [50, 50],
+      "size": {"0": 350, "1": 100},
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "outputs": [
+        {"name": "MODEL", "type": "MODEL", "links": [1]},
+        {"name": "CLIP", "type": "CLIP", "links": [2]},
+        {"name": "VAE", "type": "VAE", "links": [3]}
+      ],
+      "properties": {},
+      "widgets_values": [
+        "sd_xl_base.safetensors"
+      ],
+      "title": "Load Full Checkpoint"
+    },
+    {
+      "id": 2,
+      "type": "GGUFCheckpointSaver",
+      "pos": [450, 50],
+      "size": {"0": 350, "1": 250},
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {"name": "model", "type": "MODEL", "link": 1},
+        {"name": "clip", "type": "CLIP", "link": 2},
+        {"name": "vae", "type": "VAE", "link": 3}
+      ],
+      "outputs": [
+        {"name": "filepath", "type": "STRING", "links": [4]}
+      ],
+      "properties": {},
+      "widgets_values": [
+        "sdxl_quantized_checkpoint.gguf",
+        "Q4_K",
+        "Q8_0",
+        "F16",
+        "models/gguf/checkpoints",
+        null
+      ],
+      "title": "Save Complete GGUF Checkpoint"
+    },
+    {
+      "id": 3,
+      "type": "ShowText",
+      "pos": [850, 50],
+      "size": {"0": 300, "1": 100},
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {"name": "text", "type": "STRING", "link": 4}
+      ],
+      "properties": {},
+      "title": "Saved Checkpoint Path"
+    },
+    {
+      "id": 4,
+      "type": "Note",
+      "pos": [50, 350],
+      "size": {"0": 750, "1": 250},
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "properties": {},
+      "widgets_values": [
+        "GGUF Complete Checkpoint Workflow\n\nThis workflow saves UNet, CLIP, and VAE in a single GGUF file with optimized quantization per component:\n\n• UNet (Q4_K): The diffusion model - 4-bit quantization for maximum compression\n  - Largest component (~60-70% of file size)\n  - Q4_K provides excellent quality/size balance\n\n• CLIP (Q8_0): Text encoder - 8-bit quantization to preserve text understanding\n  - Critical for prompt accuracy\n  - Q8_0 maintains high quality with reasonable compression\n\n• VAE (F16): Image encoder/decoder - half precision, no quantization\n  - Most sensitive to quantization\n  - F16 ensures image quality\n\nExpected file size: ~40-50% of original checkpoint\nRecommended for distribution and storage!"
+      ],
+      "title": "Info: Optimal Quantization Strategy"
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "MODEL"],
+    [2, 1, 1, 2, 1, "CLIP"],
+    [3, 1, 2, 2, 2, "VAE"],
+    [4, 2, 0, 3, 0, "STRING"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}

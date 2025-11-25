@@ -1,0 +1,183 @@
+{
+  "last_node_id": 10,
+  "last_link_id": 12,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "CheckpointLoaderSimple",
+      "pos": [50, 50],
+      "size": {"0": 350, "1": 100},
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "outputs": [
+        {"name": "MODEL", "type": "MODEL", "links": [1]},
+        {"name": "CLIP", "type": "CLIP", "links": []},
+        {"name": "VAE", "type": "VAE", "links": []}
+      ],
+      "properties": {},
+      "widgets_values": [
+        "test_model.safetensors"
+      ],
+      "title": "Load Test Model"
+    },
+    {
+      "id": 2,
+      "type": "ModelToTensor",
+      "pos": [450, 50],
+      "size": {"0": 250, "1": 60},
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {"name": "model", "type": "MODEL", "link": 1}
+      ],
+      "outputs": [
+        {"name": "TENSOR", "type": "TENSOR", "links": [2, 3, 4]}
+      ],
+      "properties": {},
+      "widgets_values": [
+        "model.diffusion_model.input_blocks.0.0.weight"
+      ],
+      "title": "Extract Test Tensor"
+    },
+    {
+      "id": 3,
+      "type": "GGUFTensorQuantizer",
+      "pos": [750, 50],
+      "size": {"0": 300, "1": 120},
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {"name": "tensor", "type": "TENSOR", "link": 2}
+      ],
+      "outputs": [
+        {"name": "quantized_tensor", "type": "TENSOR", "links": [5]},
+        {"name": "statistics", "type": "STRING", "links": [6]}
+      ],
+      "properties": {},
+      "widgets_values": [
+        "Q4_K",
+        true,
+        "test_layer_q4k"
+      ],
+      "title": "Test Q4_K Quantization"
+    },
+    {
+      "id": 4,
+      "type": "GGUFTensorQuantizer",
+      "pos": [750, 220],
+      "size": {"0": 300, "1": 120},
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {"name": "tensor", "type": "TENSOR", "link": 3}
+      ],
+      "outputs": [
+        {"name": "quantized_tensor", "type": "TENSOR", "links": [7]},
+        {"name": "statistics", "type": "STRING", "links": [8]}
+      ],
+      "properties": {},
+      "widgets_values": [
+        "Q5_K",
+        true,
+        "test_layer_q5k"
+      ],
+      "title": "Test Q5_K Quantization"
+    },
+    {
+      "id": 5,
+      "type": "GGUFTensorQuantizer",
+      "pos": [750, 390],
+      "size": {"0": 300, "1": 120},
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {"name": "tensor", "type": "TENSOR", "link": 4}
+      ],
+      "outputs": [
+        {"name": "quantized_tensor", "type": "TENSOR", "links": [9]},
+        {"name": "statistics", "type": "STRING", "links": [10]}
+      ],
+      "properties": {},
+      "widgets_values": [
+        "Q8_K",
+        true,
+        "test_layer_q8k"
+      ],
+      "title": "Test Q8_K Quantization"
+    },
+    {
+      "id": 6,
+      "type": "ShowText",
+      "pos": [1100, 50],
+      "size": {"0": 400, "1": 150},
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {"name": "text", "type": "STRING", "link": 6}
+      ],
+      "properties": {},
+      "title": "Q4_K Statistics"
+    },
+    {
+      "id": 7,
+      "type": "ShowText",
+      "pos": [1100, 220],
+      "size": {"0": 400, "1": 150},
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {"name": "text", "type": "STRING", "link": 8}
+      ],
+      "properties": {},
+      "title": "Q5_K Statistics"
+    },
+    {
+      "id": 8,
+      "type": "ShowText",
+      "pos": [1100, 390],
+      "size": {"0": 400, "1": 150},
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {"name": "text", "type": "STRING", "link": 10}
+      ],
+      "properties": {},
+      "title": "Q8_K Statistics"
+    },
+    {
+      "id": 9,
+      "type": "Note",
+      "pos": [50, 200],
+      "size": {"0": 350, "1": 400},
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "properties": {},
+      "widgets_values": [
+        "Quantization Quality Testing\n\nThis workflow compares different quantization types on the same tensor:\n\n📊 Metrics Displayed:\n• Original tensor statistics\n• Quantized tensor statistics  \n• MSE (Mean Squared Error)\n• MAE (Mean Absolute Error)\n• Relative Error percentage\n\n🔍 How to Use:\n1. Load your model\n2. Extract a representative tensor\n3. Test multiple quantizations\n4. Compare statistics\n5. Choose optimal quantization\n\n✅ Recommendations:\n• Q8_K: < 1% error, best quality\n• Q6_K: < 2% error, excellent\n• Q5_K: < 3% error, very good\n• Q4_K: < 5% error, good (recommended)\n• Q3_K: < 10% error, acceptable\n• Q2_K: > 10% error, use with caution\n\nLower error = better quality!"
+      ],
+      "title": "Info: Quality Testing"
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "MODEL"],
+    [2, 2, 0, 3, 0, "TENSOR"],
+    [3, 2, 0, 4, 0, "TENSOR"],
+    [4, 2, 0, 5, 0, "TENSOR"],
+    [6, 3, 1, 6, 0, "STRING"],
+    [8, 4, 1, 7, 0, "STRING"],
+    [10, 5, 1, 8, 0, "STRING"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}
