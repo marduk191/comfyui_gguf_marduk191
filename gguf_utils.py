@@ -278,6 +278,42 @@ class GGUFWriter:
         self.tensors = []
         self.alignment = 32
 
+    def _get_block_size(self, dtype: int) -> int:
+        """Get block size for quantized types"""
+        block_sizes = {
+            GGMLType.Q4_0: 32,
+            GGMLType.Q4_1: 32,
+            GGMLType.Q5_0: 32,
+            GGMLType.Q5_1: 32,
+            GGMLType.Q8_0: 32,
+            GGMLType.Q8_1: 32,
+            GGMLType.Q2_K: 256,
+            GGMLType.Q3_K: 256,
+            GGMLType.Q4_K: 256,
+            GGMLType.Q5_K: 256,
+            GGMLType.Q6_K: 256,
+            GGMLType.Q8_K: 256,
+        }
+        return block_sizes.get(dtype, 32)
+
+    def _get_bytes_per_block(self, dtype: int) -> int:
+        """Get bytes per block for quantized types"""
+        bytes_per_block = {
+            GGMLType.Q4_0: 18,
+            GGMLType.Q4_1: 20,
+            GGMLType.Q5_0: 22,
+            GGMLType.Q5_1: 24,
+            GGMLType.Q8_0: 34,
+            GGMLType.Q8_1: 36,
+            GGMLType.Q2_K: 84,
+            GGMLType.Q3_K: 110,
+            GGMLType.Q4_K: 144,
+            GGMLType.Q5_K: 176,
+            GGMLType.Q6_K: 210,
+            GGMLType.Q8_K: 292,
+        }
+        return bytes_per_block.get(dtype, 18)
+
     def add_metadata(self, key: str, value: Any, value_type: Optional[int] = None):
         """Add metadata key-value pair"""
         if value_type is None:
