@@ -554,8 +554,11 @@ class GGUFWriter:
             aligned_offset = (current_offset + self.alignment - 1) & ~(self.alignment - 1)
             current_offset = aligned_offset
 
-        # Clear any references - we don't need them anymore
+        # Aggressive memory cleanup after pass 1
+        del tensor_names  # Don't need list anymore
         gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         print(f"Pass 2/2: Writing {len(tensor_metadata)} tensors to disk...")
 

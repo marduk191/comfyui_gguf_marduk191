@@ -12,36 +12,69 @@ from .gguf_utils import (
 )
 
 
+class LazyStateDict:
+    """Zero-copy state dict wrapper using named_parameters() - NO tensor duplication"""
+
+    def __init__(self, model):
+        self.model = model
+        self._base_model = None
+        self._param_dict = None
+        self._keys_list = None
+
+    def _get_base_model(self):
+        """Get the underlying PyTorch model"""
+        if self._base_model is None:
+            if hasattr(self.model, 'model'):
+                # ComfyUI ModelPatcher
+                if hasattr(self.model.model, 'diffusion_model'):
+                    self._base_model = self.model.model.diffusion_model
+                else:
+                    self._base_model = self.model.model
+            else:
+                self._base_model = self.model
+        return self._base_model
+
+    def _build_param_dict(self):
+        """Build dict from named_parameters and named_buffers - zero copy"""
+        if self._param_dict is None:
+            self._param_dict = {}
+            base = self._get_base_model()
+
+            # Use named_parameters() - returns references, not copies!
+            if hasattr(base, 'named_parameters'):
+                for name, param in base.named_parameters():
+                    self._param_dict[name] = param.data
+
+            # Also get buffers (batch norm stats, etc)
+            if hasattr(base, 'named_buffers'):
+                for name, buffer in base.named_buffers():
+                    if name not in self._param_dict:  # Don't override params
+                        self._param_dict[name] = buffer
+
+        return self._param_dict
+
+    def keys(self):
+        """Get all parameter/buffer names"""
+        return self._build_param_dict().keys()
+
+    def items(self):
+        """Iterate over (name, tensor) pairs"""
+        return self._build_param_dict().items()
+
+    def __getitem__(self, key):
+        """Get tensor by name"""
+        return self._build_param_dict()[key]
+
+    def __contains__(self, key):
+        return key in self._build_param_dict()
+
+
 def extract_state_dict(model):
     """
-    Extract state dict from various model types including ComfyUI ModelPatcher objects
+    Extract state dict - returns LazyStateDict wrapper
+    WARNING: Still calls state_dict() once but returns reference not copy
     """
-    state_dict = None
-
-    # Try to extract state dict from various model types
-    if hasattr(model, 'model'):
-        # ComfyUI ModelPatcher object
-        if hasattr(model.model, 'diffusion_model') and hasattr(model.model.diffusion_model, 'state_dict'):
-            state_dict = model.model.diffusion_model.state_dict()
-        elif hasattr(model.model, 'state_dict') and callable(model.model.state_dict):
-            state_dict = model.model.state_dict()
-        elif callable(getattr(model, 'model_state_dict', None)):
-            state_dict = model.model_state_dict()
-        else:
-            state_dict = model.model
-    elif isinstance(model, dict):
-        state_dict = model
-    elif hasattr(model, 'state_dict') and callable(model.state_dict):
-        state_dict = model.state_dict()
-    else:
-        # Assume it's already a state dict
-        state_dict = model
-
-    # Ensure we have a valid state dict
-    if state_dict is None or not hasattr(state_dict, 'items'):
-        raise ValueError(f"Cannot extract state dict from model type: {type(model)}")
-
-    return state_dict
+    return LazyStateDict(model)
 
 
 class GGUFModelLoader:
