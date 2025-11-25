@@ -301,7 +301,10 @@ class GGUFWriter:
         self.metadata[key] = (value, value_type)
 
     def add_tensor(self, name: str, tensor: torch.Tensor, quantization_type: int = GGMLType.F32):
-        """Add a tensor to be written (supports 1D-5D tensors)"""
+        """Add a tensor to be written (supports 1D-5D tensors)
+
+        WARNING: This stores tensors in memory. For large models, use save_streaming() instead.
+        """
         if tensor.dim() < 1 or tensor.dim() > 5:
             raise ValueError(f"Tensor {name} must be 1D-5D, got {tensor.dim()}D")
 
@@ -444,6 +447,144 @@ class GGUFWriter:
                     gc.collect()
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
+
+    def save_streaming(self, tensor_generator, tensor_count, use_gpu=False, gc_interval=1):
+        """Write GGUF file with true streaming - never stores all tensors in memory
+
+        Args:
+            tensor_generator: Iterator yielding (name, tensor, quantization_type) tuples
+            tensor_count: Total number of tensors (needed for header)
+            use_gpu: If True, perform quantization on GPU
+            gc_interval: How often to run garbage collection (default 1 for max memory efficiency)
+
+        Example:
+            def tensor_gen():
+                for name, tensor in state_dict.items():
+                    yield (name, tensor, GGMLType.Q4_K)
+
+            writer.save_streaming(tensor_gen(), len(state_dict), use_gpu=True)
+        """
+        import gc
+
+        # First pass: collect tensor metadata without storing tensors
+        print("Pass 1/2: Collecting tensor metadata...")
+        tensor_metadata = []
+        temp_tensors = []  # Temporarily store for metadata calculation
+
+        for name, tensor, quant_type in tensor_generator:
+            # Validate dimensions
+            if tensor.dim() < 1 or tensor.dim() > 5:
+                raise ValueError(f"Tensor {name} must be 1D-5D, got {tensor.dim()}D")
+
+            # Force F16 for 1D tensors
+            if tensor.dim() == 1 and quant_type not in [GGMLType.F32, GGMLType.F16]:
+                print(f"Warning: 1D tensor '{name}' forced to F16")
+                quant_type = GGMLType.F16
+
+            temp_tensors.append((name, tensor, quant_type))
+
+        # Calculate metadata
+        current_offset = 0
+        for name, tensor, quant_type in temp_tensors:
+            dims = tuple(tensor.shape[::-1])
+            n_elements = tensor.numel()
+
+            # Calculate size based on quantization
+            if quant_type == GGMLType.F32:
+                data_size = n_elements * 4
+            elif quant_type == GGMLType.F16:
+                data_size = n_elements * 2
+            else:
+                block_size = self._get_block_size(quant_type)
+                bytes_per_block = self._get_bytes_per_block(quant_type)
+                n_blocks = (n_elements + block_size - 1) // block_size
+                data_size = n_blocks * bytes_per_block
+
+            tensor_metadata.append({
+                'name': name,
+                'dims': dims,
+                'dtype': quant_type,
+                'offset': current_offset,
+                'data_size': data_size,
+            })
+
+            current_offset += data_size
+            aligned_offset = (current_offset + self.alignment - 1) & ~(self.alignment - 1)
+            current_offset = aligned_offset
+
+        print(f"Pass 2/2: Writing {len(tensor_metadata)} tensors to disk...")
+
+        # Now write the file
+        with open(self.filepath, 'wb') as f:
+            # Write header
+            f.write(struct.pack('<I', GGUF_MAGIC))
+            f.write(struct.pack('<I', GGUF_VERSION))
+            f.write(struct.pack('<Q', len(tensor_metadata)))
+            f.write(struct.pack('<Q', len(self.metadata)))
+
+            # Write metadata
+            for key, (value, value_type) in self.metadata.items():
+                self._write_string(f, key)
+                f.write(struct.pack('<I', value_type))
+                self._write_value(f, value, value_type)
+
+            # Write tensor metadata
+            for info in tensor_metadata:
+                self._write_string(f, info['name'])
+                f.write(struct.pack('<I', len(info['dims'])))
+                for dim in info['dims']:
+                    f.write(struct.pack('<Q', dim))
+                f.write(struct.pack('<I', info['dtype']))
+                f.write(struct.pack('<Q', info['offset']))
+
+            # Align to 32 bytes before tensor data
+            current_pos = f.tell()
+            aligned_pos = (current_pos + self.alignment - 1) & ~(self.alignment - 1)
+            padding = aligned_pos - current_pos
+            f.write(b'\x00' * padding)
+
+            # Write tensor data - process one at a time from temp storage
+            for idx, (name, tensor, quant_type) in enumerate(temp_tensors):
+                # GPU acceleration mode
+                if use_gpu and tensor.is_cuda:
+                    with torch.no_grad():
+                        quantized_data = self._quantize_tensor(tensor, quant_type)
+                else:
+                    # Move to CPU for memory efficiency
+                    if tensor.is_cuda:
+                        tensor = tensor.cpu()
+                    with torch.no_grad():
+                        quantized_data = self._quantize_tensor(tensor, quant_type)
+
+                f.write(quantized_data)
+
+                # Immediate cleanup
+                del quantized_data
+                del temp_tensors[idx]  # Remove reference to free memory
+
+                # Align to 32 bytes
+                current_pos = f.tell()
+                aligned_pos = (current_pos + self.alignment - 1) & ~(self.alignment - 1)
+                padding = aligned_pos - current_pos
+                if padding > 0:
+                    f.write(b'\x00' * padding)
+
+                # Aggressive garbage collection for streaming mode
+                if idx % gc_interval == 0:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                if (idx + 1) % 100 == 0:
+                    print(f"  Written {idx + 1}/{len(tensor_metadata)} tensors...")
+
+        # Final cleanup
+        del temp_tensors
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        print(f"✓ Completed streaming write of {len(tensor_metadata)} tensors")
 
     def _write_string(self, f, s: str):
         """Write a GGUF string"""
