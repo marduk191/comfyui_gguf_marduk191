@@ -20,6 +20,7 @@ class LazyStateDict:
         self._base_model = None
         self._param_dict = None
         self._keys_list = None
+        self._modifications = {}  # Store modified/patched tensors separately
 
     def _get_base_model(self):
         """Get the underlying PyTorch model"""
@@ -54,19 +55,37 @@ class LazyStateDict:
         return self._param_dict
 
     def keys(self):
-        """Get all parameter/buffer names"""
-        return self._build_param_dict().keys()
+        """Get all parameter/buffer names including modifications"""
+        base_keys = set(self._build_param_dict().keys())
+        mod_keys = set(self._modifications.keys())
+        return base_keys | mod_keys
 
     def items(self):
-        """Iterate over (name, tensor) pairs"""
-        return self._build_param_dict().items()
+        """Iterate over (name, tensor) pairs - includes modifications"""
+        # Yield all base params first
+        for name, tensor in self._build_param_dict().items():
+            if name in self._modifications:
+                yield name, self._modifications[name]  # Use modified version
+            else:
+                yield name, tensor
+
+        # Yield any modifications that weren't in base
+        for name, tensor in self._modifications.items():
+            if name not in self._build_param_dict():
+                yield name, tensor
 
     def __getitem__(self, key):
-        """Get tensor by name"""
+        """Get tensor by name - checks modifications first"""
+        if key in self._modifications:
+            return self._modifications[key]
         return self._build_param_dict()[key]
 
+    def __setitem__(self, key, value):
+        """Set tensor - stores in modifications dict to avoid breaking zero-copy"""
+        self._modifications[key] = value
+
     def __contains__(self, key):
-        return key in self._build_param_dict()
+        return key in self._modifications or key in self._build_param_dict()
 
 
 def extract_state_dict(model):
