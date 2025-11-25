@@ -484,14 +484,14 @@ class GGUFWriter:
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
 
-    def save_streaming(self, tensor_dict, quant_types, use_gpu=False, gc_interval=1):
+    def save_streaming(self, tensor_dict, quant_types, use_gpu=False, gc_interval=50):
         """Write GGUF file with true streaming - processes tensors on-demand
 
         Args:
             tensor_dict: Dictionary of {name: tensor} (e.g., state_dict)
             quant_types: Dictionary of {name: quantization_type} or single type for all
             use_gpu: If True, perform quantization on GPU
-            gc_interval: How often to run garbage collection (default 1 for max memory efficiency)
+            gc_interval: How often to run garbage collection (default 50 for speed, lower for more RAM efficiency)
 
         Example:
             quant_types = {name: GGMLType.Q4_K for name in state_dict.keys()}
@@ -599,22 +599,31 @@ class GGUFWriter:
                 # Get tensor from dict on-demand (not from stored copy)
                 tensor = tensor_dict[name]
 
-                # GPU acceleration mode
-                if use_gpu and tensor.is_cuda:
+                # GPU acceleration mode - MOVE to GPU if requested
+                if use_gpu and torch.cuda.is_available():
+                    # Move to GPU for fast quantization
+                    if not tensor.is_cuda:
+                        tensor = tensor.cuda()
+
                     with torch.no_grad():
                         quantized_data = self._quantize_tensor(tensor, quant_type)
+
+                    # Free tensor reference (CUDA cache cleared on gc_interval)
+                    del tensor
                 else:
-                    # Move to CPU for memory efficiency
+                    # CPU mode - move to CPU if needed
                     if tensor.is_cuda:
                         tensor = tensor.cpu()
+
                     with torch.no_grad():
                         quantized_data = self._quantize_tensor(tensor, quant_type)
+
+                    del tensor
 
                 f.write(quantized_data)
 
                 # Immediate cleanup - critical for low memory
                 del quantized_data
-                del tensor  # Remove local reference
 
                 # Align to 32 bytes
                 current_pos = f.tell()
