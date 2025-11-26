@@ -504,18 +504,18 @@ class GGUFWriter:
             single_type = quant_types
             quant_types = {name: single_type for name in tensor_dict.keys()}
 
-        # Filter to only tensor entries
-        tensor_names = [name for name, value in tensor_dict.items() if isinstance(value, torch.Tensor)]
+        # Filter to only tensor entries and collect metadata in ONE pass
+        print(f"Pass 1/2: Calculating metadata (streaming, no storage)...")
 
-        print(f"Pass 1/2: Calculating metadata for {len(tensor_names)} tensors (no storage)...")
-
-        # First pass: collect ONLY metadata (shapes, types) - DO NOT STORE TENSORS
         tensor_metadata = []
         current_offset = 0
 
-        for name in tensor_names:
-            tensor = tensor_dict[name]
-            quant_type = quant_types.get(name, GGMLType.F32)
+        # Iterate items() directly - yields tensors one at a time
+        for name, tensor in tensor_dict.items():
+            if not isinstance(tensor, torch.Tensor):
+                continue
+
+            quant_type = quant_types.get(name, GGMLType.F32) if isinstance(quant_types, dict) else quant_types
 
             # Validate dimensions
             if tensor.dim() < 1 or tensor.dim() > 5:
@@ -525,9 +525,10 @@ class GGUFWriter:
             if tensor.dim() == 1 and quant_type not in [GGMLType.F32, GGMLType.F16]:
                 print(f"Warning: 1D tensor '{name}' forced to F16")
                 quant_type = GGMLType.F16
-                quant_types[name] = quant_type  # Update for second pass
+                if isinstance(quant_types, dict):
+                    quant_types[name] = quant_type
 
-            # Calculate metadata from tensor properties WITHOUT storing tensor
+            # Calculate metadata WITHOUT storing tensor
             dims = tuple(tensor.shape[::-1])
             n_elements = tensor.numel()
 
@@ -555,7 +556,6 @@ class GGUFWriter:
             current_offset = aligned_offset
 
         # Aggressive memory cleanup after pass 1
-        del tensor_names  # Don't need list anymore
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -591,13 +591,17 @@ class GGUFWriter:
             padding = aligned_pos - current_pos
             f.write(b'\x00' * padding)
 
-            # Second pass: Write tensor data one at a time by re-accessing dict
-            for idx, info in enumerate(tensor_metadata):
-                name = info['name']
-                quant_type = info['dtype']
+            # Build metadata lookup dict for O(1) access
+            metadata_dict = {info['name']: info for info in tensor_metadata}
 
-                # Get tensor from dict on-demand (not from stored copy)
-                tensor = tensor_dict[name]
+            # Second pass: Iterate items() directly (no dict lookups!)
+            idx = 0
+            for name, tensor in tensor_dict.items():
+                if not isinstance(tensor, torch.Tensor) or name not in metadata_dict:
+                    continue
+
+                info = metadata_dict[name]
+                quant_type = info['dtype']
 
                 # GPU acceleration mode - MOVE to GPU if requested
                 if use_gpu and torch.cuda.is_available():
@@ -631,6 +635,9 @@ class GGUFWriter:
                 padding = aligned_pos - current_pos
                 if padding > 0:
                     f.write(b'\x00' * padding)
+
+                # Increment counter
+                idx += 1
 
                 # Aggressive garbage collection for streaming mode
                 if idx % gc_interval == 0:

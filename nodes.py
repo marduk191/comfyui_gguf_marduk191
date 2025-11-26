@@ -13,20 +13,18 @@ from .gguf_utils import (
 
 
 class LazyStateDict:
-    """Zero-copy state dict wrapper using named_parameters() - NO tensor duplication"""
+    """Ultra-lazy state dict - NEVER builds full dict in memory"""
 
     def __init__(self, model):
         self.model = model
         self._base_model = None
-        self._param_dict = None
-        self._keys_list = None
-        self._modifications = {}  # Store modified/patched tensors separately
+        self._modifications = {}  # Only modifications
+        self._keys_cache = None  # Just names, not tensors
 
     def _get_base_model(self):
         """Get the underlying PyTorch model"""
         if self._base_model is None:
             if hasattr(self.model, 'model'):
-                # ComfyUI ModelPatcher
                 if hasattr(self.model.model, 'diffusion_model'):
                     self._base_model = self.model.model.diffusion_model
                 else:
@@ -35,57 +33,82 @@ class LazyStateDict:
                 self._base_model = self.model
         return self._base_model
 
-    def _build_param_dict(self):
-        """Build dict from named_parameters and named_buffers - zero copy"""
-        if self._param_dict is None:
-            self._param_dict = {}
+    def keys(self):
+        """Get parameter names only - NO tensors"""
+        if self._keys_cache is None:
+            self._keys_cache = []
             base = self._get_base_model()
 
-            # Use named_parameters() - returns references, not copies!
+            # Collect names only, not tensors!
             if hasattr(base, 'named_parameters'):
-                for name, param in base.named_parameters():
-                    self._param_dict[name] = param.data
+                for name, _ in base.named_parameters():
+                    self._keys_cache.append(name)
 
-            # Also get buffers (batch norm stats, etc)
             if hasattr(base, 'named_buffers'):
-                for name, buffer in base.named_buffers():
-                    if name not in self._param_dict:  # Don't override params
-                        self._param_dict[name] = buffer
+                for name, _ in base.named_buffers():
+                    if name not in self._keys_cache:
+                        self._keys_cache.append(name)
 
-        return self._param_dict
-
-    def keys(self):
-        """Get all parameter/buffer names including modifications"""
-        base_keys = set(self._build_param_dict().keys())
-        mod_keys = set(self._modifications.keys())
-        return base_keys | mod_keys
+        return self._keys_cache
 
     def items(self):
-        """Iterate over (name, tensor) pairs - includes modifications"""
-        # Yield all base params first
-        for name, tensor in self._build_param_dict().items():
-            if name in self._modifications:
-                yield name, self._modifications[name]  # Use modified version
-            else:
-                yield name, tensor
+        """Iterate on-demand - yields tensors one at a time, NEVER stores all"""
+        base = self._get_base_model()
+        seen = set()
 
-        # Yield any modifications that weren't in base
+        # Iterate named_parameters - yields one at a time
+        if hasattr(base, 'named_parameters'):
+            for name, param in base.named_parameters():
+                if name in self._modifications:
+                    yield name, self._modifications[name]
+                else:
+                    yield name, param.data
+                seen.add(name)
+
+        # Iterate named_buffers
+        if hasattr(base, 'named_buffers'):
+            for name, buffer in base.named_buffers():
+                if name not in seen:
+                    if name in self._modifications:
+                        yield name, self._modifications[name]
+                    else:
+                        yield name, buffer
+                    seen.add(name)
+
+        # Add modifications not in base model
         for name, tensor in self._modifications.items():
-            if name not in self._build_param_dict():
+            if name not in seen:
                 yield name, tensor
 
     def __getitem__(self, key):
-        """Get tensor by name - checks modifications first"""
+        """Get single tensor on-demand - search without building dict"""
         if key in self._modifications:
             return self._modifications[key]
-        return self._build_param_dict()[key]
+
+        base = self._get_base_model()
+
+        # Search in parameters
+        if hasattr(base, 'named_parameters'):
+            for name, param in base.named_parameters():
+                if name == key:
+                    return param.data
+
+        # Search in buffers
+        if hasattr(base, 'named_buffers'):
+            for name, buffer in base.named_buffers():
+                if name == key:
+                    return buffer
+
+        raise KeyError(f"'{key}' not found")
 
     def __setitem__(self, key, value):
-        """Set tensor - stores in modifications dict to avoid breaking zero-copy"""
+        """Store modifications only"""
         self._modifications[key] = value
 
     def __contains__(self, key):
-        return key in self._modifications or key in self._build_param_dict()
+        if key in self._modifications:
+            return True
+        return key in self.keys()
 
 
 def extract_state_dict(model):
